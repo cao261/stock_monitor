@@ -1,0 +1,44 @@
+# ====================== Python ======================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ====================== Install marker ======================
+# 一次性标记文件，由 start.bat 写入
+.deps_installed
+
+# ====================== 数据库（用户数据，不入库）======================
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# ====================== 前端构建产物 ======================
+# frontend/.gitignore 已经覆盖 node_modules / dist / .vscode
+# 这里只补一条根目录的兜底
+dist/
+
+# ====================== 运行时调试产物 ======================
+# 这两个是本会话临时验证文件，正式项目里不该有
+_browser_launcher.log
+_resp_*.json
+_smoke.*
+_test_ak.*
+_test_color.mjs.bak
+_test_poll.ps1.bak
+_test_prune.mjs.bak
+_verify*.py
+*.bak
+
+# ====================== IDE / OS ======================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# һ���� commit message �ݸ壨�� amend �Ƴ���
+_commit_msg.txt
