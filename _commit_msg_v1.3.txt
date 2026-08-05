@@ -1,0 +1,33 @@
+feat(v1.3): 自选股代码 6 位纯数字自动归一化 + exchange 交叉校验
+
+背景：用户输 589130 报"格式错误"，因为前端正则要求 8 位带前缀。但其实 589130
+（科创芯片ETF易方达）必须写 sh589130 才正确。手动加前缀不友好，且后端
+对前缀/交易所错配没有校验，会留脏数据。
+
+后端 app/schemas/watchlist.py：
+- 复用 market_fetcher._normalize_code()（单一事实源）作为归一化规则
+- ts_code field_validator 接受 6 位纯数字 → 自动补 sh/sz/bj 前缀
+- 新增 model_validator: exchange 字段交叉校验
+  - 传了 exchange → 不一致 422，错误信息清晰（"SH 开头的代码应该属于 SH"）
+  - 没传 exchange → 从 ts_code 前缀自动推断并填充
+- min_length 从 8 放宽到 6（6 位纯数字是最短合法形式）
+
+前端 Dashboard.vue：
+- 新增 normalizeTsCode() / prefixToExchange() 工具函数（与后端规则一致）
+- onAdd 提交前归一化：6 位纯数字 → 自动加前缀
+- placeholder 更新：sh600000 / 600000 / 510300
+- exchange 字段自动从前缀推断，前端不用手填
+
+测试 _test_v13.py 9/9 通过：
+1. 6 位数字 589130 → sh589130
+2. 000001 → sz000001
+3. 920001 → bj920001
+4. sh589130 + exchange=BJ → 422
+5. sh510300 不传 exchange → 自动补 SH
+6. 7 位数字 → 422
+7. 带字母 → 422
+8. 完整带前缀 → 201
+9. 重复归一化后冲突 → 409
+
+Build: ✓ 379.26 KB JS / 34.29 KB CSS
+README v1.3 节追加

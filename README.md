@@ -1,4 +1,4 @@
-# A-Stock Sentiment Monitor v1.2
+# A-Stock Sentiment Monitor v1.3
 
 A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
@@ -226,6 +226,36 @@ v1.1 只算"赚多少"。v1.2 让自选股从『盯盘表』变成『私人交�
 
 `app/database.py:migrate_db()` 自动添加两列；旧的 v1.1 数据库原地升级，
 数据不丢。如果想从零开始：删 `data/stock_monitor.db` → 启动时 `create_all` 重建。
+
+## Watchlist portfolio v1.3 — 6 位纯数字自动归一化 + 交叉校验
+
+v1.2 之前用户必须手敲 `sh600000` / `sz159915` 这种带前缀的代码。v1.3 让加自选股
+像输股票软件一样：直接输 6 位纯数字就行，前后端联手自动补前缀；同时加交叉校验防脏数据。
+
+### 归一化规则
+
+复用 `market_fetcher._normalize_code()`（单一事实源）：
+
+| 6 位数字首字母 | 归一化前缀 | 涵盖 |
+|---|---|---|
+| `5` / `6` | `sh` | 上交所主板(60x)、科创板(68x)、ETF(51x/56x/58x/59x) |
+| `0` / `3` | `sz` | 深交所主板(00x)、创业板(30x)、ETF(15x) |
+| `4` / `8` / `9` | `bj` | 北交所老代码(43x/83x 等)、新代码(92x) |
+
+### 交叉校验
+
+- 传了 `exchange` → 必须与 `ts_code` 前缀一致，否则 422
+- 没传 `exchange` → schema 自动从 `ts_code` 前缀推断并填充（前端不用关心）
+
+### 前端体验
+
+Dashboard 顶部输入框：
+- 旧 placeholder：`sh600000 / sh510300`
+- 新 placeholder：`sh600000 / 600000 / 510300`
+- 输入 `589130` → 提交时调 `normalizeTsCode()` 变 `sh589130`，再 PATCH/POST
+- 输错前缀（`sh999999` 实际是 bj 代码）→ 后端 422，前端红色错误条
+
+测试 `_test_v13.py` 9/9 通过：6 位归一化、前缀 / exchange 错配、重复冲突、非法格式。
 
 ## ETF support
 

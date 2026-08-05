@@ -203,11 +203,36 @@ async function refresh() {
   }
 }
 
+// ====================== 工具 ======================
+// 与后端 _normalize_code 同源：A 股 6 位纯数字 → 自动补 sh/sz/bj 前缀
+// 规则：5/6 开头 → sh（上交所含科创板/ETF），0/3 开头 → sz（深交所含创业板/ETF），
+//      4/8/9 开头 → bj（北交所）
+function normalizeTsCode(raw) {
+  const s = String(raw || '').trim().toLowerCase()
+  if (!s) return ''
+  if (s.startsWith('sh') || s.startsWith('sz') || s.startsWith('bj')) {
+    return s
+  }
+  if (!/^\d{6}$/.test(s)) return s
+  if (s.startsWith('5') || s.startsWith('6')) return 'sh' + s
+  if (s.startsWith('0') || s.startsWith('3')) return 'sz' + s
+  if (s.startsWith('4') || s.startsWith('8') || s.startsWith('9')) return 'bj' + s
+  return 'sh' + s  // 兜底
+}
+function prefixToExchange(prefixed) {
+  if (prefixed.startsWith('sh')) return 'SH'
+  if (prefixed.startsWith('sz')) return 'SZ'
+  if (prefixed.startsWith('bj')) return 'BJ'
+  return null
+}
+
 async function onAdd() {
-  const code = newCode.value.trim().toLowerCase()
-  if (!code) { addError.value = '请输入股票代码'; return }
+  const raw = newCode.value.trim()
+  if (!raw) { addError.value = '请输入股票代码'; return }
+  // 先归一化：6 位纯数字自动补前缀
+  const code = normalizeTsCode(raw)
   if (!/^(sh|sz|bj)\d{6}$/.test(code)) {
-    addError.value = '代码格式错误（示例：sh600000 / sh510300）'
+    addError.value = '代码格式错误（示例：sh600000 / 600000 / sh510300）'
     return
   }
   // 校验可选持仓字段
@@ -250,10 +275,13 @@ async function onAdd() {
   }
   const note = newNote.value.trim() || null
 
+  // exchange 字段：从归一化后的 ts_code 前缀推断
+  // 兜底逻辑：用户可以不传 exchange，后端允许 null；但我们顺手补上，前端体验更稳
+  const exchange = prefixToExchange(code)
+
   adding.value = true
   addError.value = ''
   try {
-    const exchange = code.startsWith('sh') ? 'SH' : code.startsWith('sz') ? 'SZ' : 'BJ'
     await addToWatchlist({
       ts_code: code,
       name: newName.value.trim() || undefined,
@@ -490,7 +518,7 @@ onUnmounted(() => {
             <input
               v-model="newCode"
               type="text"
-              placeholder="sh600000 / sh510300"
+              placeholder="sh600000 / 600000 / 510300"
               class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
                      text-slate-100 placeholder-slate-600 focus:outline-none
                      focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50

@@ -4,14 +4,29 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+# 复用 market_fetcher 的代码归一化规则（5/6→sh, 0/3→sz, 4/8/9→bj）
+# 用延迟 import 避免循环依赖（market_fetcher 又会通过 router 拉 db 间接拉 schema）
+def _normalize_ts_code(raw: str) -> str:
+    """把 6 位纯数字代码归一化为带 sh/sz/bj 前缀的标准形式。"""
+    from market_fetcher import _normalize_code
+    return _normalize_code(raw)
+
 
 # Tushare 风格代码：交易所前缀 + 6 位数字
 _TS_CODE_RE = re.compile(r"^(sh|sz|bj)\d{6}$", re.IGNORECASE)
+# 6 位纯数字代码
+_BARE_CODE_RE = re.compile(r"^\d{6}$")
+# 前缀 → 交易所的对应关系（用于交叉校验）
+_PREFIX_TO_EXCHANGE = {"sh": "SH", "sz": "SZ", "bj": "BJ"}
 
 
 class WatchlistBase(BaseModel):
-    ts_code: str = Field(..., min_length=8, max_length=16, description="如 sh600000")
+    ts_code: str = Field(
+        ..., min_length=6, max_length=16,
+        description="形如 sh600000 / sz000001 / bj920000，或 6 位纯数字（自动补前缀）",
+    )
     name: str | None = Field(default=None, max_length=64)
     exchange: str | None = Field(default=None, max_length=8, description="SH / SZ / BJ")
     market: str | None = Field(default=None, max_length=16)
@@ -37,23 +52,55 @@ class WatchlistBase(BaseModel):
         default=None, ge=0, description="止损/防守价（元/股），触发后弹通知"
     )
 
-    @field_validator("ts_code")
+    @field_validator("ts_code", mode="before")
     @classmethod
-    def _check_ts_code(cls, v: str) -> str:
-        v_norm = v.strip().lower()
-        if not _TS_CODE_RE.match(v_norm):
-            raise ValueError("ts_code 必须形如 sh600000 / sz000001 / bj920000")
-        return v_norm
+    def _check_ts_code(cls, v) -> str:
+        """6 位纯数字 → 自动归一化为带前缀；带前缀的 → 校验格式。"""
+        if v is None:
+            raise ValueError("ts_code 不能为空")
+        raw = str(v).strip().lower()
+        if not raw:
+            raise ValueError("ts_code 不能为空")
+        # 6 位纯数字 → 调归一化
+        if _BARE_CODE_RE.match(raw):
+            return _normalize_ts_code(raw)
+        # 带前缀的 → 校验格式
+        if not _TS_CODE_RE.match(raw):
+            raise ValueError(
+                "ts_code 必须是 6 位纯数字 或 形如 sh600000 / sz000001 / bj920000"
+            )
+        return raw
 
-    @field_validator("exchange")
+    @field_validator("exchange", mode="before")
     @classmethod
     def _check_exchange(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        v_norm = v.strip().upper()
+        v_norm = str(v).strip().upper()
         if v_norm not in {"SH", "SZ", "BJ"}:
             raise ValueError("exchange 必须是 SH / SZ / BJ 之一")
         return v_norm
+
+    @model_validator(mode="after")
+    def _check_exchange_consistency(self) -> "WatchlistBase":
+        """exchange 字段必须与 ts_code 前缀一致。
+        1) 传了 exchange → 交叉校验，不一致 422
+        2) 没传 exchange → 从 ts_code 前缀自动补全（用户友好）
+        """
+        prefix = self.ts_code[:2].lower()
+        expected = _PREFIX_TO_EXCHANGE.get(prefix)
+        if not expected:
+            return self
+        if not self.exchange:
+            # 自动补全
+            object.__setattr__(self, "exchange", expected)
+            return self
+        if self.exchange != expected:
+            raise ValueError(
+                f"ts_code 前缀 {prefix.upper()} 与 exchange={self.exchange} 不一致"
+                f"（{prefix} 开头的代码应该属于 {expected}）"
+            )
+        return self
 
 
 class WatchlistCreate(WatchlistBase):
@@ -82,7 +129,7 @@ class WatchlistUpdate(BaseModel):
     def _check_exchange(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        v_norm = v.strip().upper()
+        v_norm = str(v).strip().upper()
         if v_norm not in {"SH", "SZ", "BJ"}:
             raise ValueError("exchange 必须是 SH / SZ / BJ 之一")
         return v_norm
