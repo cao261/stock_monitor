@@ -38,6 +38,12 @@ class Watchlist(Base):
     # 交易逻辑备忘（买入理由、止损位、目标位等）
     trade_note: Mapped[str | None] = mapped_column(String(500), nullable=True, default=None)
 
+    # ===== 止盈止损（v1.2 增量）=====
+    # 止盈目标价（元/股）：现价 >= target_win 触发 is_take_profit 信号
+    target_win: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # 止损/防守价（元/股）：现价 <= target_loss 触发 is_stop_loss 信号
+    target_loss: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

@@ -29,6 +29,14 @@ class WatchlistBase(BaseModel):
         default=None, max_length=500, description="交易逻辑备忘"
     )
 
+    # ===== 止盈止损（v1.2 增量）=====
+    target_win: float | None = Field(
+        default=None, ge=0, description="止盈目标价（元/股），触发后弹通知"
+    )
+    target_loss: float | None = Field(
+        default=None, ge=0, description="止损/防守价（元/股），触发后弹通知"
+    )
+
     @field_validator("ts_code")
     @classmethod
     def _check_ts_code(cls, v: str) -> str:
@@ -65,6 +73,9 @@ class WatchlistUpdate(BaseModel):
     cost_price: float | None = Field(default=None, ge=0)
     position: int | None = Field(default=None, ge=0)
     trade_note: str | None = Field(default=None, max_length=500)
+    # v1.2: 止盈止损
+    target_win: float | None = Field(default=None, ge=0)
+    target_loss: float | None = Field(default=None, ge=0)
 
     @field_validator("exchange")
     @classmethod

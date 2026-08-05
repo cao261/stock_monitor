@@ -26,14 +26,17 @@ const loading = ref(false)
 const lastUpdated = ref(null)
 const now = ref(Date.now())
 
-// 表单（v1.1: 加 3 个持仓字段）
+// 表单（v1.2: 加 target_win / target_loss 止盈止损）
 const newCode = ref('')
 const newName = ref('')
 const newCost = ref('')         // 字符串，提交时 parseFloat
 const newPosition = ref('')     // 字符串，提交时 parseInt
+const newTargetWin = ref('')    // 止盈价（可选）
+const newTargetLoss = ref('')   // 止损价（可选）
 const newNote = ref('')
 const adding = ref(false)
 const addError = ref('')
+const showAdvanced = ref(false)  // 是否展开"高级选项"（止盈止损 + 备忘）
 
 // 排序
 const sortKey = ref('')
@@ -228,6 +231,23 @@ async function onAdd() {
     addError.value = '成本价和持仓股数要一起填（或都留空）'
     return
   }
+  // v1.2: 解析止盈 / 止损
+  let targetWin = null, targetLoss = null
+  const twRaw = newTargetWin.value.trim()
+  if (twRaw !== '') {
+    targetWin = parseFloat(twRaw)
+    if (Number.isNaN(targetWin) || targetWin <= 0) { addError.value = '止盈价必须是 > 0 的数字'; return }
+  }
+  const tlRaw = newTargetLoss.value.trim()
+  if (tlRaw !== '') {
+    targetLoss = parseFloat(tlRaw)
+    if (Number.isNaN(targetLoss) || targetLoss <= 0) { addError.value = '止损价必须是 > 0 的数字'; return }
+  }
+  // 如果两个都填，止盈必须 > 止损
+  if (targetWin != null && targetLoss != null && targetWin <= targetLoss) {
+    addError.value = '止盈价必须高于止损价'
+    return
+  }
   const note = newNote.value.trim() || null
 
   adding.value = true
@@ -240,6 +260,8 @@ async function onAdd() {
       exchange,
       cost_price: cost,
       position: position,
+      target_win: targetWin,
+      target_loss: targetLoss,
       trade_note: note,
     })
     await refreshHistory()
@@ -247,7 +269,10 @@ async function onAdd() {
     newName.value = ''
     newCost.value = ''
     newPosition.value = ''
+    newTargetWin.value = ''
+    newTargetLoss.value = ''
     newNote.value = ''
+    showAdvanced.value = false
     await refresh()
   } catch (e) {
     addError.value = e.message
@@ -289,6 +314,12 @@ async function commitEdit(id, field) {
       value = parseInt(raw, 10)
       if (Number.isNaN(value) || value < 0 || String(value) !== raw) {
         editError.value = '持仓股数必须是 ≥ 0 的整数'
+        return
+      }
+    } else if (field === 'target_win' || field === 'target_loss') {
+      value = parseFloat(raw)
+      if (Number.isNaN(value) || value <= 0) {
+        editError.value = `${field === 'target_win' ? '止盈' : '止损'}价必须是 > 0 的数字`
         return
       }
     }
@@ -341,9 +372,31 @@ function canNotify() {
 function notifyNewSignals(fresh) {
   if (!canNotify()) return
   for (const s of fresh) {
-    const kind = s.signals.is_volume_breakout
+    const sigs = s.signals || {}
+    // 优先级：止盈/止损 > 量价异动
+    if (sigs.is_take_profit) {
+      try {
+        new Notification('🎯 止盈信号', {
+          body: `${s.ts_code} ${s.name || ''} 到达止盈线 ${fmtPrice(sigs.target_win)} · 现价 ${fmtPrice(s.current.close)} · 注意减仓`,
+          tag: `signal-${s.ts_code}-take-profit`,
+        })
+      } catch (_) { /* ignore */ }
+      continue
+    }
+    if (sigs.is_stop_loss) {
+      try {
+        new Notification('🛡️ 止损信号', {
+          body: `${s.ts_code} ${s.name || ''} 触及止损线 ${fmtPrice(sigs.target_loss)} · 现价 ${fmtPrice(s.current.close)} · 建议减仓 / 离场`,
+          tag: `signal-${s.ts_code}-stop-loss`,
+          requireInteraction: true,  // 止损必须手动关，不自动消失
+        })
+      } catch (_) { /* ignore */ }
+      continue
+    }
+    // 量价异动
+    const kind = sigs.is_volume_breakout
       ? '放量突破'
-      : s.signals.is_shrinking_pullback ? '缩量企稳' : '异动'
+      : sigs.is_shrinking_pullback ? '缩量企稳' : '异动'
     try {
       new Notification('量价异动', {
         body: `${s.ts_code} ${s.name || ''} 触发 ${kind}（量比 ${s.volume_ratio}，涨幅 ${fmtPct(s.current.change_pct)}）`,
@@ -426,88 +479,136 @@ onUnmounted(() => {
       {{ error }}
     </p>
 
-    <!-- ====================== 添加表单（v1.1 含持仓字段）===================== -->
+    <!-- ====================== 添加表单（v1.2: 高级选项折叠）===================== -->
     <section class="glass p-5 mb-6">
-      <form @submit.prevent="onAdd" class="flex flex-wrap items-end gap-3">
-        <div class="flex-1 min-w-[140px]">
-          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
-            股票 / ETF 代码
-          </label>
-          <input
-            v-model="newCode"
-            type="text"
-            placeholder="sh600000 / sh510300"
-            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                   text-slate-100 placeholder-slate-600 focus:outline-none
-                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
-                   font-mono text-sm transition"
-          />
+      <form @submit.prevent="onAdd" class="space-y-3">
+        <div class="flex flex-wrap items-end gap-3">
+          <div class="flex-1 min-w-[140px]">
+            <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+              股票 / ETF 代码
+            </label>
+            <input
+              v-model="newCode"
+              type="text"
+              placeholder="sh600000 / sh510300"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                     font-mono text-sm transition"
+            />
+          </div>
+          <div class="flex-1 min-w-[120px]">
+            <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+              名称（可选）
+            </label>
+            <input
+              v-model="newName"
+              type="text"
+              placeholder="浦发银行"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                     text-sm transition"
+            />
+          </div>
+          <div class="w-24">
+            <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+              成本价
+            </label>
+            <input
+              v-model="newCost"
+              type="number" step="0.01" min="0"
+              placeholder="10.50"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                     font-mono text-sm transition"
+            />
+          </div>
+          <div class="w-24">
+            <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+              持仓股
+            </label>
+            <input
+              v-model="newPosition"
+              type="number" step="1" min="0"
+              placeholder="1000"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                     font-mono text-sm transition"
+            />
+          </div>
+          <button
+            type="button"
+            @click="showAdvanced = !showAdvanced"
+            class="px-3 py-2 glass text-slate-300 hover:text-slate-100
+                   hover:border-sky-500/50 text-xs transition"
+            :title="showAdvanced ? '收起高级选项' : '展开高级选项（止盈止损 / 备忘）'"
+          >
+            <span class="inline-block transition" :class="showAdvanced ? 'rotate-90' : ''">▸</span>
+            高级选项
+          </button>
+          <button
+            type="submit"
+            :disabled="adding"
+            class="px-5 py-2 bg-emerald-600/90 hover:bg-emerald-500
+                   disabled:bg-slate-700 disabled:text-slate-500
+                   text-white rounded font-medium text-sm transition
+                   shadow-lg shadow-emerald-900/30"
+          >{{ adding ? '添加中…' : '+ 添加' }}</button>
         </div>
-        <div class="flex-1 min-w-[120px]">
-          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
-            名称（可选）
-          </label>
-          <input
-            v-model="newName"
-            type="text"
-            placeholder="浦发银行"
-            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                   text-slate-100 placeholder-slate-600 focus:outline-none
-                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
-                   text-sm transition"
-          />
+
+        <!-- 高级选项：止盈 / 止损 / 备忘 -->
+        <div
+          v-show="showAdvanced"
+          class="grid grid-cols-1 md:grid-cols-3 gap-3 pt-3 border-t border-slate-700/40"
+        >
+          <div>
+            <label class="block text-xs text-emerald-400 mb-1.5 tracking-wider font-medium">
+              🎯 止盈价
+            </label>
+            <input
+              v-model="newTargetWin"
+              type="number" step="0.01" min="0"
+              placeholder="15.50"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-emerald-500/70 focus:ring-1 focus:ring-emerald-500/50
+                     font-mono text-sm transition"
+            />
+          </div>
+          <div>
+            <label class="block text-xs text-rose-400 mb-1.5 tracking-wider font-medium">
+              🛡️ 止损价
+            </label>
+            <input
+              v-model="newTargetLoss"
+              type="number" step="0.01" min="0"
+              placeholder="13.20"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-rose-500/70 focus:ring-1 focus:ring-rose-500/50
+                     font-mono text-sm transition"
+            />
+          </div>
+          <div>
+            <label class="block text-xs text-amber-400 mb-1.5 tracking-wider font-medium">
+              📝 交易逻辑
+            </label>
+            <input
+              v-model="newNote"
+              type="text"
+              placeholder="突破前高 + 缩量回踩 10 日线"
+              class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                     text-slate-100 placeholder-slate-600 focus:outline-none
+                     focus:border-amber-500/70 focus:ring-1 focus:ring-amber-500/50
+                     text-sm transition"
+            />
+          </div>
         </div>
-        <div class="w-24">
-          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
-            成本价
-          </label>
-          <input
-            v-model="newCost"
-            type="number" step="0.01" min="0"
-            placeholder="10.50"
-            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                   text-slate-100 placeholder-slate-600 focus:outline-none
-                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
-                   font-mono text-sm transition"
-          />
-        </div>
-        <div class="w-24">
-          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
-            持仓股
-          </label>
-          <input
-            v-model="newPosition"
-            type="number" step="1" min="0"
-            placeholder="1000"
-            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                   text-slate-100 placeholder-slate-600 focus:outline-none
-                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
-                   font-mono text-sm transition"
-          />
-        </div>
-        <div class="flex-1 min-w-[160px]">
-          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
-            交易逻辑（可选）
-          </label>
-          <input
-            v-model="newNote"
-            type="text"
-            placeholder="突破前高 + 缩量回踩 10 日线"
-            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                   text-slate-100 placeholder-slate-600 focus:outline-none
-                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
-                   text-sm transition"
-          />
-        </div>
-        <button
-          type="submit"
-          :disabled="adding"
-          class="px-5 py-2 bg-emerald-600/90 hover:bg-emerald-500
-                 disabled:bg-slate-700 disabled:text-slate-500
-                 text-white rounded font-medium text-sm transition
-                 shadow-lg shadow-emerald-900/30"
-        >{{ adding ? '添加中…' : '+ 添加' }}</button>
-        <p v-if="addError" class="basis-full text-rose-400 text-xs mt-1 font-mono">
+
+        <p v-if="addError" class="text-rose-400 text-xs font-mono">
           {{ addError }}
         </p>
       </form>
@@ -642,9 +743,11 @@ onUnmounted(() => {
                 量比 <span class="text-xs ml-0.5">{{ sortIndicator('volume_ratio') }}</span>
               </th>
               <th class="text-right py-3 px-4 font-medium" title="点击单元格修改">成本价</th>
+              <th class="text-right py-3 px-4 font-medium" title="点击单元格修改">止盈</th>
+              <th class="text-right py-3 px-4 font-medium" title="点击单元格修改">止损</th>
               <th class="text-right py-3 px-4 font-medium" title="点击单元格修改">持仓股</th>
               <th class="text-right py-3 px-4 font-medium">持仓盈亏</th>
-              <th class="text-center py-3 px-4 font-medium">备忘</th>
+              <th class="text-center py-3 px-4 font-medium">交易计划</th>
               <th class="text-left py-3 px-4 font-medium">信号</th>
               <th class="text-right py-3 px-4 font-medium">操作</th>
             </tr>
@@ -717,6 +820,60 @@ onUnmounted(() => {
                 </span>
               </td>
 
+              <!-- ====== 止盈：行内编辑 ====== -->
+              <td class="py-3 px-4 text-right font-mono">
+                <input
+                  v-if="isEditing(w.id, 'target_win')"
+                  v-focus
+                  v-model="editValues[editKey(w.id, 'target_win')]"
+                  @blur="commitEdit(w.id, 'target_win')"
+                  @keyup.enter="commitEdit(w.id, 'target_win')"
+                  @keyup.escape="cancelEdit"
+                  type="number" step="0.01" min="0"
+                  class="w-24 px-2 py-1 bg-slate-900 border border-emerald-500/60 rounded
+                         text-slate-100 font-mono text-sm text-right
+                         focus:outline-none focus:ring-1 focus:ring-emerald-500/50"
+                />
+                <span
+                  v-else
+                  @click="startEdit(w.id, 'target_win', w.target_win)"
+                  :class="[
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    w.target_win != null ? 'text-emerald-300' : 'text-slate-600',
+                  ]"
+                  :title="w.target_win != null ? `止盈 ${fmtPrice(w.target_win)} · 点击修改` : '点击录入止盈价'"
+                >
+                  {{ w.target_win != null ? fmtPrice(w.target_win) : '+' }}
+                </span>
+              </td>
+
+              <!-- ====== 止损：行内编辑 ====== -->
+              <td class="py-3 px-4 text-right font-mono">
+                <input
+                  v-if="isEditing(w.id, 'target_loss')"
+                  v-focus
+                  v-model="editValues[editKey(w.id, 'target_loss')]"
+                  @blur="commitEdit(w.id, 'target_loss')"
+                  @keyup.enter="commitEdit(w.id, 'target_loss')"
+                  @keyup.escape="cancelEdit"
+                  type="number" step="0.01" min="0"
+                  class="w-24 px-2 py-1 bg-slate-900 border border-rose-500/60 rounded
+                         text-slate-100 font-mono text-sm text-right
+                         focus:outline-none focus:ring-1 focus:ring-rose-500/50"
+                />
+                <span
+                  v-else
+                  @click="startEdit(w.id, 'target_loss', w.target_loss)"
+                  :class="[
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    w.target_loss != null ? 'text-rose-300' : 'text-slate-600',
+                  ]"
+                  :title="w.target_loss != null ? `止损 ${fmtPrice(w.target_loss)} · 点击修改` : '点击录入止损价'"
+                >
+                  {{ w.target_loss != null ? fmtPrice(w.target_loss) : '+' }}
+                </span>
+              </td>
+
               <!-- ====== 持仓股：行内编辑 ====== -->
               <td class="py-3 px-4 text-right font-mono">
                 <input
@@ -755,27 +912,64 @@ onUnmounted(() => {
                 {{ fmtPnl(w.floating_pnl) }}
               </td>
 
-              <!-- ====== 交易备忘 hover tooltip ====== -->
-              <td class="py-3 px-4 text-center">
-                <span
-                  v-if="w.trade_note"
-                  @mouseenter="showNoteTip($event, w.trade_note)"
-                  @mousemove="moveNoteTip"
-                  @mouseleave="hideNoteTip"
-                  class="cursor-help text-amber-400 hover:text-amber-300 text-base
-                         hover:scale-110 inline-block transition"
-                >📝</span>
-                <span v-else class="text-slate-700 text-xs">—</span>
+              <!-- ====== 交易计划：trade_note tooltip + 止盈止损小字 ====== -->
+              <td class="py-3 px-4 text-left">
+                <div class="flex items-start gap-2">
+                  <span
+                    v-if="w.trade_note"
+                    @mouseenter="showNoteTip($event, w.trade_note)"
+                    @mousemove="moveNoteTip"
+                    @mouseleave="hideNoteTip"
+                    class="cursor-help text-amber-400 hover:text-amber-300 text-base
+                           hover:scale-110 inline-block transition flex-shrink-0 mt-0.5"
+                    :title="w.trade_note"
+                  >📝</span>
+                  <span
+                    v-else
+                    class="text-slate-700 text-xs flex-shrink-0 mt-0.5"
+                  >—</span>
+                  <div class="flex flex-col gap-0.5 text-xs font-mono leading-tight">
+                    <span v-if="w.target_win != null" class="text-emerald-400/80">
+                      止盈 {{ fmtPrice(w.target_win) }}
+                    </span>
+                    <span v-if="w.target_loss != null" class="text-rose-400/80">
+                      止损 {{ fmtPrice(w.target_loss) }}
+                    </span>
+                  </div>
+                </div>
               </td>
 
               <td class="py-3 px-4">
-                <span v-if="w.signal?.signals?.is_volume_breakout" class="badge badge-breakout">
-                  🔥 放量突破
-                </span>
-                <span v-else-if="w.signal?.signals?.is_shrinking_pullback" class="badge badge-shrinking">
-                  🟢 缩量企稳
-                </span>
-                <span v-else class="text-slate-600 text-xs">—</span>
+                <div class="flex flex-wrap gap-1">
+                  <!-- v1.2: 止盈 / 止损优先显示，pulse 动画 -->
+                  <span
+                    v-if="w.signal?.signals?.is_take_profit"
+                    class="badge badge-win"
+                    :title="`触发止盈线 ${fmtPrice(w.signal.signals.target_win)}`"
+                  >
+                    🎯 止盈
+                  </span>
+                  <span
+                    v-if="w.signal?.signals?.is_stop_loss"
+                    class="badge badge-loss"
+                    :title="`触及止损线 ${fmtPrice(w.signal.signals.target_loss)}`"
+                  >
+                    🛡️ 止损
+                  </span>
+                  <span v-if="w.signal?.signals?.is_volume_breakout" class="badge badge-breakout">
+                    🔥 放量突破
+                  </span>
+                  <span v-else-if="w.signal?.signals?.is_shrinking_pullback" class="badge badge-shrinking">
+                    🟢 缩量企稳
+                  </span>
+                  <span
+                    v-if="!w.signal?.signals?.is_take_profit
+                       && !w.signal?.signals?.is_stop_loss
+                       && !w.signal?.signals?.is_volume_breakout
+                       && !w.signal?.signals?.is_shrinking_pullback"
+                    class="text-slate-600 text-xs"
+                  >—</span>
+                </div>
               </td>
               <td class="py-3 px-4 text-right whitespace-nowrap">
                 <button
@@ -797,7 +991,7 @@ onUnmounted(() => {
     </section>
 
     <footer class="mt-6 text-center text-xs text-slate-600 font-mono">
-      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 交易备忘 v1.1
+      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v1.2
     </footer>
 
     <!-- ====================== 交易备忘 hover tooltip（v1.1）====================== -->

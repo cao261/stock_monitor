@@ -33,6 +33,10 @@ class WatchlistQuote(BaseModel):
     position: int | None = Field(None, description="持仓数量（股）")
     trade_note: str | None = Field(None, description="交易逻辑备忘")
 
+    # ===== 止盈止损（v1.2 增量）=====
+    target_win: float | None = Field(None, description="止盈目标价")
+    target_loss: float | None = Field(None, description="止损/防守价")
+
     # 派生：盈亏与收益率（缺失字段或 cache miss 时为 null）
     # floating_pnl = (price - cost_price) * position
     # return_rate = (price - cost_price) / cost_price * 100  （百分比）

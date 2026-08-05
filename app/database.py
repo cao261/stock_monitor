@@ -65,11 +65,20 @@ def migrate_db(engine) -> None:
     又是重启时已加过的列不会报错。
 
     项目规模还小，引入 Alembic 有点重。等 schema 变更频繁 / 需要回滚版本时再迁。
+
+    注意：SQLite 的 ``ALTER TABLE`` **不能修改已有列、不能加 NOT NULL 约束、不能加
+    DEFAULT 表达式**。如果以后需要这些操作，得：
+      1) 删 ``data/stock_monitor.db``（项目内只有自选股和告警规则，本地数据，删了重输），
+      2) 启动时 ``Base.metadata.create_all`` 会按最新 model 重建。
     """
     inspections: list[tuple[str, str]] = [
+        # v1.1
         ("cost_price", "ALTER TABLE watchlist ADD COLUMN cost_price FLOAT"),
         ("position",   "ALTER TABLE watchlist ADD COLUMN position   INTEGER"),
         ("trade_note", "ALTER TABLE watchlist ADD COLUMN trade_note VARCHAR(500)"),
+        # v1.2
+        ("target_win",  "ALTER TABLE watchlist ADD COLUMN target_win  FLOAT"),
+        ("target_loss", "ALTER TABLE watchlist ADD COLUMN target_loss FLOAT"),
     ]
     with engine.begin() as conn:
         for col, ddl in inspections:

@@ -122,6 +122,8 @@ async def list_watchlist_quotes(
                     cost_price=item.cost_price,
                     position=item.position,
                     trade_note=item.trade_note,
+                    target_win=item.target_win,
+                    target_loss=item.target_loss,
                     floating_pnl=None,
                     return_rate=None,
                 )
@@ -147,10 +149,12 @@ async def list_watchlist_quotes(
                 quote_date=quote.get("quote_date"),
                 quote_time=quote.get("quote_time"),
                 updated_at=quote.get("updated_at"),
-                # 持仓
+                # 持仓 / 止盈止损 (v1.1 + v1.2)
                 cost_price=item.cost_price,
                 position=item.position,
                 trade_note=item.trade_note,
+                target_win=item.target_win,
+                target_loss=item.target_loss,
                 floating_pnl=floating_pnl,
                 return_rate=return_rate,
             )
@@ -182,13 +186,28 @@ def list_watchlist_signals(
                     "ts_code": item.ts_code,
                     "name": item.name,
                     "in_cache": False,
-                    "signals": {"is_volume_breakout": False, "is_shrinking_pullback": False},
+                    "signals": {
+                        "is_volume_breakout": False,
+                        "is_shrinking_pullback": False,
+                        "is_take_profit": False,
+                        "is_stop_loss": False,
+                    },
                 })
             continue
         history = mf.get_history(item.ts_code)
-        sig = analyzer.check_signals(item.ts_code, current, history)
+        # v1.2: 把止盈/止损价也传进信号引擎，触发对应 is_take_profit / is_stop_loss
+        sig = analyzer.check_signals(
+            item.ts_code,
+            current,
+            history,
+            target_win=item.target_win,
+            target_loss=item.target_loss,
+        )
         triggered = (
-            sig["signals"]["is_volume_breakout"] or sig["signals"]["is_shrinking_pullback"]
+            sig["signals"]["is_volume_breakout"]
+            or sig["signals"]["is_shrinking_pullback"]
+            or sig["signals"]["is_take_profit"]
+            or sig["signals"]["is_stop_loss"]
         )
         if only_triggered and not triggered:
             continue

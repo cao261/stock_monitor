@@ -121,14 +121,22 @@ def check_signals(
     code: str,
     current: dict[str, Any],
     history: dict[str, Any] | None = None,
+    *,
+    target_win: float | None = None,
+    target_loss: float | None = None,
 ) -> dict[str, Any]:
-    """对单只股票判断两个信号。
+    """对单只股票判断 4 个信号（量比 ×2 + 止盈/止损 ×2）。
 
     量比公式（与通达信、同花顺一致）::
 
         量比 = 实时总成交量 / (过去 5 日均量 / 240 * 当前已开盘分钟数)
 
     当 5 日均量为 0（无历史数据）或非交易时段时，量比按 0 处理，**不会**触发放量信号。
+
+    止盈止损（v1.2）：
+      - target_win  设置 + 现价 >= target_win  → is_take_profit
+      - target_loss 设置 + 现价 <= target_loss → is_stop_loss
+      - 都触发时 `trade_message` 给出双行提示文案
     """
     avg_vol_5d = float((history or {}).get("avg_volume_5d") or 0.0)
     minutes = trading_minutes_elapsed()
@@ -150,8 +158,20 @@ def check_signals(
     is_shrinking_pullback = (
         (SHRINKING_CHANGE_PCT_LO <= chg <= SHRINKING_CHANGE_PCT_HI)
         and (vol_ratio < SHRINKING_PULLBACK_RATIO)
-        and (vol_ratio > 0)  # 必须有有效量比（避免非交易时段误判）
+        and (vol_ratio > 0)
     )
+
+    # ===== 止盈/止损（v1.2）=====
+    is_take_profit = bool(target_win and target_win > 0 and price > 0 and price >= target_win)
+    is_stop_loss = bool(target_loss and target_loss > 0 and price > 0 and price <= target_loss)
+
+    # 触发文案（双行，去桌面通知的 body 用）
+    trade_messages: list[str] = []
+    if is_take_profit and target_win is not None:
+        trade_messages.append(f"到达止盈线 {target_win:.2f}，注意减仓")
+    if is_stop_loss and target_loss is not None:
+        trade_messages.append(f"触发止损线 {target_loss:.2f}，注意防守")
+    trade_message = "\n".join(trade_messages) if trade_messages else None
 
     return {
         "code": code,
@@ -173,6 +193,9 @@ def check_signals(
         "signals": {
             "is_volume_breakout": is_volume_breakout,
             "is_shrinking_pullback": is_shrinking_pullback,
+            "is_take_profit": is_take_profit,
+            "is_stop_loss": is_stop_loss,
         },
+        "trade_message": trade_message,
         "calculated_at": datetime.now().isoformat(timespec="seconds"),
     }

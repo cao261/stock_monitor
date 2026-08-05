@@ -1,0 +1,28 @@
+feat(v1.2): watchlist portfolio — 止盈止损 / 交易计划 / 桌面通知
+
+后端：
+- watchlist 表新增 target_win / target_loss 字段（migrate_db 幂等 ALTER）
+- WatchlistCreate / WatchlistUpdate / WatchlistQuote schema 全部透传
+- analyzer.check_signals 新增 is_take_profit / is_stop_loss 信号判断 + trade_message 文案
+- /api/watchlist/quotes 响应带上 target_win / target_loss
+- /api/watchlist/signals 触发信号附带 trade_message
+
+前端：
+- 添加表单：可折叠「高级选项」区，分色输入（止盈 emerald / 止损 rose / 备忘 amber）
+- 表格新增 止盈 / 止损 列，行内编辑（点击 → input → blur/Enter 保存 PATCH）
+- 交易计划列合并 trade_note tooltip + 止盈/止损小字
+- 信号 badge：🎯 止盈 (badge-win, 1.5s pulse) / 🛡️ 止损 (badge-loss, 1s pulse)
+- 桌面通知：止盈/止损独立 handler，止损 requireInteraction 不自动消失
+- 行内编辑扩展到 4 字段：成本价、持仓股、止盈、止损
+
+测试：_test_v12.py 6/6 通过
+- POST with all 5 portfolio fields
+- GET /quotes 字段透传
+- PATCH target_win 行内编辑场景
+- /signals schema 含 is_take_profit / is_stop_loss / trade_message
+- only_triggered=true 过滤
+- 422 校验 target_win=-1
+
+README v1.2 节追加（字段表、新信号、UI 行为、数据迁移说明）。
+
+Build: ✓ 378.90 KB JS / 34.29 KB CSS
