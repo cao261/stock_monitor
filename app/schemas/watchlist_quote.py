@@ -28,4 +28,15 @@ class WatchlistQuote(BaseModel):
     quote_time: str | None = None
     updated_at: str | None = None
 
+    # ===== 持仓 / 交易备忘（v1.1 增量）=====
+    cost_price: float | None = Field(None, description="买入成本价")
+    position: int | None = Field(None, description="持仓数量（股）")
+    trade_note: str | None = Field(None, description="交易逻辑备忘")
+
+    # 派生：盈亏与收益率（缺失字段或 cache miss 时为 null）
+    # floating_pnl = (price - cost_price) * position
+    # return_rate = (price - cost_price) / cost_price * 100  （百分比）
+    floating_pnl: float | None = Field(None, description="浮动盈亏（元）")
+    return_rate: float | None = Field(None, description="收益率（%）")
+
     model_config = ConfigDict(from_attributes=True)

@@ -18,6 +18,17 @@ class WatchlistBase(BaseModel):
     industry: str | None = Field(default=None, max_length=64)
     is_active: bool = Field(default=True)
 
+    # ===== 持仓 / 交易备忘（v1.1 增量）=====
+    cost_price: float | None = Field(
+        default=None, ge=0, description="买入成本价（元/股），未持仓留空"
+    )
+    position: int | None = Field(
+        default=None, ge=0, description="持仓数量（股），未持仓留空"
+    )
+    trade_note: str | None = Field(
+        default=None, max_length=500, description="交易逻辑备忘"
+    )
+
     @field_validator("ts_code")
     @classmethod
     def _check_ts_code(cls, v: str) -> str:
@@ -49,6 +60,11 @@ class WatchlistUpdate(BaseModel):
     market: str | None = Field(default=None, max_length=16)
     industry: str | None = Field(default=None, max_length=64)
     is_active: bool | None = None
+    # 持仓字段：null 表示"不更新这个字段"，传值（含 null）会同步到 DB
+    # （注意区分"没传"和"传了 None"——下面用 model_fields_set / model_dump 的策略）
+    cost_price: float | None = Field(default=None, ge=0)
+    position: int | None = Field(default=None, ge=0)
+    trade_note: str | None = Field(default=None, max_length=500)
 
     @field_validator("exchange")
     @classmethod

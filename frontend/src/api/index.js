@@ -49,12 +49,26 @@ export function getSignals(onlyTriggered = true) {
 }
 
 /**
- * 新增自选股。
+ * 新增自选股（含可选持仓字段 v1.1）。
  * POST /watchlist
- * @param {{ ts_code: string, name?: string, exchange?: string }} payload
+ * @param {{ ts_code: string, name?: string, exchange?: string,
+ *          cost_price?: number, position?: number, trade_note?: string }} payload
  */
 export function addToWatchlist(payload) {
   return api.post('/watchlist', payload)
+}
+
+/**
+ * 更新自选股（部分字段）。inline 编辑用。
+ * PATCH /watchlist/{id}
+ * @param {number} id
+ * @param {{ name?: string, cost_price?: number|null,
+ *          position?: number|null, trade_note?: string|null,
+ *          is_active?: boolean }} payload
+ *   传 null 表示清空这个字段
+ */
+export function updateWatchlist(id, payload) {
+  return api.patch(`/watchlist/${id}`, payload)
 }
 
 /**

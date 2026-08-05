@@ -1,9 +1,9 @@
-"""watchlist 表：自选股清单。"""
+"""watchlist 表：自选股清单（含持仓 / 交易备忘）。"""
 from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Index, Integer, String, func
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
@@ -29,6 +29,14 @@ class Watchlist(Base):
     industry: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 是否仍在监控
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # ===== 持仓 / 交易备忘（v1.1 增量）=====
+    # 买入成本价（元/股）。null = 只观察、未持仓
+    cost_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    # 持仓数量（股）。null = 只观察、未持仓
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    # 交易逻辑备忘（买入理由、止损位、目标位等）
+    trade_note: Mapped[str | None] = mapped_column(String(500), nullable=True, default=None)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()

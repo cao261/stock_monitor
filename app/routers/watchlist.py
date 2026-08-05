@@ -84,6 +84,11 @@ async def list_watchlist_quotes(
     cache miss 时（典型：用户刚加的 ETF 还没被 5s 轮询抓到）：
     立即调 ``ensure_price_in_cache`` 拉一次，保证 watchlist 里
     任何代码（股票 + ETF）都能立即返回行情。
+
+    持仓字段（cost_price / position）若有 + 行情有现价，则计算：
+      - floating_pnl = (price - cost_price) * position
+      - return_rate  = (price - cost_price) / cost_price * 100
+    任一字段缺失则相应返回 null。
     """
     items = crud.list(db, skip=0, limit=1000, is_active=is_active)
     result: list[WatchlistQuote] = []
@@ -92,6 +97,18 @@ async def list_watchlist_quotes(
         if quote is None:
             # cache miss：实时单只拉取（支持 ETF）
             quote = await mf.ensure_price_in_cache(item.ts_code)
+
+        # ===== 计算浮动盈亏 & 收益率（v1.1）=====
+        floating_pnl: float | None = None
+        return_rate: float | None = None
+        if quote is not None and item.cost_price is not None and item.position is not None:
+            price = quote.get("price")
+            if price is not None:
+                diff = float(price) - float(item.cost_price)
+                floating_pnl = round(diff * float(item.position), 2)
+                if float(item.cost_price) > 0:
+                    return_rate = round(diff / float(item.cost_price) * 100.0, 2)
+
         if quote is None:
             result.append(
                 WatchlistQuote(
@@ -102,6 +119,11 @@ async def list_watchlist_quotes(
                     industry=item.industry,
                     is_active=item.is_active,
                     in_cache=False,
+                    cost_price=item.cost_price,
+                    position=item.position,
+                    trade_note=item.trade_note,
+                    floating_pnl=None,
+                    return_rate=None,
                 )
             )
             continue
@@ -125,6 +147,12 @@ async def list_watchlist_quotes(
                 quote_date=quote.get("quote_date"),
                 quote_time=quote.get("quote_time"),
                 updated_at=quote.get("updated_at"),
+                # 持仓
+                cost_price=item.cost_price,
+                position=item.position,
+                trade_note=item.trade_note,
+                floating_pnl=floating_pnl,
+                return_rate=return_rate,
             )
         )
     return result

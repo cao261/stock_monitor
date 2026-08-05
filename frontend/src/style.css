@@ -135,3 +135,24 @@ select {
   border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.7); }
+
+/* ====================== 交易备忘 hover tooltip（v1.1）====================== */
+.note-tip {
+  position: fixed;
+  pointer-events: none;
+  z-index: 50;
+  background: rgba(15, 23, 42, 0.97);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 0.5rem;
+  padding: 0.6rem 0.85rem;
+  max-width: 320px;
+  backdrop-filter: blur(10px) saturate(140%);
+  -webkit-backdrop-filter: blur(10px) saturate(140%);
+  box-shadow: 0 10px 28px -4px rgba(0, 0, 0, 0.6);
+  transform: translate(14px, 14px);
+  animation: noteTipIn 120ms ease-out;
+}
+@keyframes noteTipIn {
+  from { opacity: 0; transform: translate(14px, 18px); }
+  to   { opacity: 1; transform: translate(14px, 14px); }
+}

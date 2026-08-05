@@ -85,12 +85,12 @@ All endpoints are under `/api`.
 | POST | `/api/market/refresh` | force full-market fetch |
 | POST | `/api/market/history/refresh` | force history refresh for watchlist |
 | GET | `/api/watchlist` | CRUD on watchlist |
-| POST | `/api/watchlist` | add ticker |
-| GET | `/api/watchlist/quotes` | watchlist joined with live quotes |
+| POST | `/api/watchlist` | add ticker (v1.1: optional `cost_price` / `position` / `trade_note`) |
+| GET | `/api/watchlist/quotes` | watchlist joined with live quotes (v1.1: `floating_pnl` + `return_rate` derived) |
 | GET | `/api/watchlist/signals?only_triggered=true` | signal scan |
 | GET | `/api/watchlist/{id}` | by id |
 | GET | `/api/watchlist/by-code/{ts_code}` | by code |
-| PATCH | `/api/watchlist/{id}` | partial update |
+| PATCH | `/api/watchlist/{id}` | partial update (v1.1: includes `cost_price` / `position` / `trade_note`; send `null` to clear) |
 | DELETE | `/api/watchlist/{id}` | delete (cascades alert_rules) |
 
 Interactive Swagger: <http://127.0.0.1:8000/docs>
@@ -153,6 +153,33 @@ Where `vol_ratio = current_volume / (5day_avg_volume / 240 * minutes_since_open)
 
 When a new signal appears (not in the previous tick), the browser fires a
 desktop notification (Notification API, requires user opt-in).
+
+## Watchlist portfolio (v1.1)
+
+Beyond price watching, each watchlist row can carry portfolio state:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `cost_price` | float | 买入成本价（元/股），未持仓留空 |
+| `position` | int | 持仓数量（股），未持仓留空 |
+| `trade_note` | str | 交易逻辑备忘（≤ 500 字）|
+
+When the watchlist row is loaded, `/api/watchlist/quotes` derives:
+
+- `floating_pnl` = `(price - cost_price) * position`
+- `return_rate`  = `(price - cost_price) / cost_price * 100`  (%)
+
+Either input missing → both derived fields are `null`.
+
+Frontend behavior:
+- Adding a new row: optional `成本价` / `持仓股` / `交易逻辑` inputs in the form
+- Display: 2 new columns (持仓盈亏, 收益率), color follows A-share convention (涨红跌绿)
+- Inline edit: click `成本价` or `持仓股` cell → input → blur or Enter to save → PATCH `/api/watchlist/{id}`
+- Hover the 📝 icon → glassmorphism tooltip shows the trade note
+
+Database migration: `app/database.py:migrate_db()` runs `ALTER TABLE ... ADD COLUMN` on every
+startup with `OperationalError` swallowed on already-existing columns — fully idempotent, no
+Alembic needed for this scale.
 
 ## ETF support
 

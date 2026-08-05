@@ -8,6 +8,7 @@ import {
   getWatchlist,
   refreshHistory,
   removeFromWatchlist,
+  updateWatchlist,
 } from '../api'
 import KLineChart from './KLineChart.vue'
 import FundFlowBubble from './FundFlowBubble.vue'
@@ -25,9 +26,12 @@ const loading = ref(false)
 const lastUpdated = ref(null)
 const now = ref(Date.now())
 
-// 表单
+// 表单（v1.1: 加 3 个持仓字段）
 const newCode = ref('')
 const newName = ref('')
+const newCost = ref('')         // 字符串，提交时 parseFloat
+const newPosition = ref('')     // 字符串，提交时 parseInt
+const newNote = ref('')
 const adding = ref(false)
 const addError = ref('')
 
@@ -38,6 +42,13 @@ const sortDir = ref('desc')
 // K 线模态框
 const chartCode = ref(null)
 const chartName = ref('')
+
+// 行内编辑（v1.1）: 哪一行 + 哪个字段正在被编辑
+const editingCell = ref(null)  // { id, field } | null
+const editValues = ref({})     // { [`${id}-${field}`]: string }
+const editError = ref('')      // 行内编辑错误（如 -1 价格）
+// trade_note tooltip hover
+const noteTip = ref(null)      // { x, y, text } | null
 
 let prevSignalCodes = new Set()
 
@@ -55,12 +66,43 @@ function fmtPrice(v) {
   if (v == null) return '-'
   return Number(v).toFixed(2)
 }
+// 浮动盈亏：带正负号 + 千分位
+function fmtPnl(v) {
+  if (v == null || Number.isNaN(v)) return '-'
+  const sign = v > 0 ? '+' : ''
+  return sign + Number(v).toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
 function fmtTimeAgo(ts) {
   if (!ts) return '-'
   const s = Math.floor((now.value - ts) / 1000)
   if (s < 5) return '刚刚'
   if (s < 60) return `${s} 秒前`
   return `${Math.floor(s / 60)} 分钟前`
+}
+
+// ====================== 颜色辅助（A 股约定：涨红跌绿）======================
+function pnlColorClass(v) {
+  if (v == null) return 'text-slate-500'
+  if (v > 0) return 'text-rose-400'
+  if (v < 0) return 'text-emerald-400'
+  return 'text-slate-400'
+}
+function pnlGlowClass(v) {
+  if (v == null) return ''
+  if (v > 0) return 'glow-rose'
+  if (v < 0) return 'glow-emerald'
+  return ''
+}
+
+// ====================== 自定义指令：v-focus ======================
+// 行内编辑开始时自动 focus + 选中（让用户直接覆盖）
+const vFocus = {
+  mounted(el) {
+    el.focus()
+    if (typeof el.select === 'function') {
+      try { el.select() } catch (_) {}
+    }
+  },
 }
 
 function sentimentGradientClass(score) {
@@ -165,6 +207,29 @@ async function onAdd() {
     addError.value = '代码格式错误（示例：sh600000 / sh510300）'
     return
   }
+  // 校验可选持仓字段
+  let cost = null, position = null
+  const costRaw = newCost.value.trim()
+  if (costRaw !== '') {
+    cost = parseFloat(costRaw)
+    if (Number.isNaN(cost) || cost < 0) { addError.value = '成本价必须是 ≥ 0 的数字'; return }
+  }
+  const posRaw = newPosition.value.trim()
+  if (posRaw !== '') {
+    position = parseInt(posRaw, 10)
+    if (Number.isNaN(position) || position < 0 || String(position) !== posRaw) {
+      addError.value = '持仓股数必须是 ≥ 0 的整数'
+      return
+    }
+  }
+  // 注意：用户可能只填了成本没填股数（或反之）—— 不允许半残，让后端不要算
+  // 简化策略：两个都必填，或都为空。要么两个都填，要么两个都空。
+  if ((cost != null && position == null) || (cost == null && position != null)) {
+    addError.value = '成本价和持仓股数要一起填（或都留空）'
+    return
+  }
+  const note = newNote.value.trim() || null
+
   adding.value = true
   addError.value = ''
   try {
@@ -173,16 +238,81 @@ async function onAdd() {
       ts_code: code,
       name: newName.value.trim() || undefined,
       exchange,
+      cost_price: cost,
+      position: position,
+      trade_note: note,
     })
     await refreshHistory()
     newCode.value = ''
     newName.value = ''
+    newCost.value = ''
+    newPosition.value = ''
+    newNote.value = ''
     await refresh()
   } catch (e) {
     addError.value = e.message
   } finally {
     adding.value = false
   }
+}
+
+// ====================== 行内编辑（v1.1）=======================
+function isEditing(id, field) {
+  return editingCell.value && editingCell.value.id === id && editingCell.value.field === field
+}
+function editKey(id, field) {
+  return `${id}-${field}`
+}
+function startEdit(id, field, currentValue) {
+  editingCell.value = { id, field }
+  editValues.value[editKey(id, field)] = currentValue == null ? '' : String(currentValue)
+  editError.value = ''
+}
+function cancelEdit() {
+  editingCell.value = null
+  editError.value = ''
+}
+async function commitEdit(id, field) {
+  const key = editKey(id, field)
+  const raw = (editValues.value[key] ?? '').trim()
+  editingCell.value = null
+  // 空串 → 视为"清空这个字段"
+  let value = null
+  if (raw !== '') {
+    if (field === 'cost_price') {
+      value = parseFloat(raw)
+      if (Number.isNaN(value) || value < 0) {
+        editError.value = '成本价必须是 ≥ 0 的数字'
+        return
+      }
+    } else if (field === 'position') {
+      value = parseInt(raw, 10)
+      if (Number.isNaN(value) || value < 0 || String(value) !== raw) {
+        editError.value = '持仓股数必须是 ≥ 0 的整数'
+        return
+      }
+    }
+  }
+  try {
+    await updateWatchlist(id, { [field]: value })
+    await refresh()
+  } catch (e) {
+    editError.value = e.message
+  }
+}
+
+// ====================== 交易备忘 hover tooltip =======================
+function showNoteTip(event, text) {
+  if (!text) return
+  noteTip.value = { x: event.clientX, y: event.clientY, text }
+}
+function moveNoteTip(event) {
+  if (noteTip.value) {
+    noteTip.value = { ...noteTip.value, x: event.clientX, y: event.clientY }
+  }
+}
+function hideNoteTip() {
+  noteTip.value = null
 }
 
 async function onRemove(id) {
@@ -296,10 +426,10 @@ onUnmounted(() => {
       {{ error }}
     </p>
 
-    <!-- ====================== 添加表单 ====================== -->
+    <!-- ====================== 添加表单（v1.1 含持仓字段）===================== -->
     <section class="glass p-5 mb-6">
       <form @submit.prevent="onAdd" class="flex flex-wrap items-end gap-3">
-        <div class="flex-1 min-w-[160px]">
+        <div class="flex-1 min-w-[140px]">
           <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
             股票 / ETF 代码
           </label>
@@ -313,14 +443,56 @@ onUnmounted(() => {
                    font-mono text-sm transition"
           />
         </div>
-        <div class="flex-1 min-w-[140px]">
+        <div class="flex-1 min-w-[120px]">
           <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
             名称（可选）
           </label>
           <input
             v-model="newName"
             type="text"
-            placeholder="浦发银行 / 沪深300ETF"
+            placeholder="浦发银行"
+            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                   text-slate-100 placeholder-slate-600 focus:outline-none
+                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                   text-sm transition"
+          />
+        </div>
+        <div class="w-24">
+          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+            成本价
+          </label>
+          <input
+            v-model="newCost"
+            type="number" step="0.01" min="0"
+            placeholder="10.50"
+            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                   text-slate-100 placeholder-slate-600 focus:outline-none
+                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                   font-mono text-sm transition"
+          />
+        </div>
+        <div class="w-24">
+          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+            持仓股
+          </label>
+          <input
+            v-model="newPosition"
+            type="number" step="1" min="0"
+            placeholder="1000"
+            class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
+                   text-slate-100 placeholder-slate-600 focus:outline-none
+                   focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                   font-mono text-sm transition"
+          />
+        </div>
+        <div class="flex-1 min-w-[160px]">
+          <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
+            交易逻辑（可选）
+          </label>
+          <input
+            v-model="newNote"
+            type="text"
+            placeholder="突破前高 + 缩量回踩 10 日线"
             class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
                    text-slate-100 placeholder-slate-600 focus:outline-none
                    focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
@@ -451,6 +623,15 @@ onUnmounted(() => {
               >
                 涨跌幅 <span class="text-xs ml-0.5">{{ sortIndicator('change_pct') }}</span>
               </th>
+              <th
+                class="text-right py-3 px-4 font-medium cursor-pointer select-none
+                       hover:text-slate-200 transition"
+                :class="sortKey === 'return_rate' ? 'text-sky-400' : ''"
+                @click="toggleSort('return_rate')"
+                title="点击按收益率排序"
+              >
+                收益率 <span class="text-xs ml-0.5">{{ sortIndicator('return_rate') }}</span>
+              </th>
               <th class="text-right py-3 px-4 font-medium">成交量</th>
               <th
                 class="text-right py-3 px-4 font-medium cursor-pointer select-none
@@ -460,6 +641,10 @@ onUnmounted(() => {
               >
                 量比 <span class="text-xs ml-0.5">{{ sortIndicator('volume_ratio') }}</span>
               </th>
+              <th class="text-right py-3 px-4 font-medium" title="点击单元格修改">成本价</th>
+              <th class="text-right py-3 px-4 font-medium" title="点击单元格修改">持仓股</th>
+              <th class="text-right py-3 px-4 font-medium">持仓盈亏</th>
+              <th class="text-center py-3 px-4 font-medium">备忘</th>
               <th class="text-left py-3 px-4 font-medium">信号</th>
               <th class="text-right py-3 px-4 font-medium">操作</th>
             </tr>
@@ -489,6 +674,10 @@ onUnmounted(() => {
                   'text-slate-500': w.change_pct == null,
                 }"
               >{{ w.in_cache ? fmtPct(w.change_pct) : '-' }}</td>
+              <td
+                class="py-3 px-4 text-right font-mono font-semibold"
+                :class="pnlColorClass(w.return_rate)"
+              >{{ fmtPct(w.return_rate) }}</td>
               <td class="py-3 px-4 text-right font-mono text-slate-400">
                 {{ w.in_cache ? fmtVol(w.volume) : '-' }}
               </td>
@@ -500,6 +689,85 @@ onUnmounted(() => {
                   'text-slate-400': w.volume_ratio == null || (w.volume_ratio >= 0.8 && w.volume_ratio <= 2.5),
                 }"
               >{{ w.volume_ratio != null ? w.volume_ratio.toFixed(2) : '-' }}</td>
+
+              <!-- ====== 成本价：行内编辑 ====== -->
+              <td class="py-3 px-4 text-right font-mono">
+                <input
+                  v-if="isEditing(w.id, 'cost_price')"
+                  v-focus
+                  v-model="editValues[editKey(w.id, 'cost_price')]"
+                  @blur="commitEdit(w.id, 'cost_price')"
+                  @keyup.enter="commitEdit(w.id, 'cost_price')"
+                  @keyup.escape="cancelEdit"
+                  type="number" step="0.01" min="0"
+                  class="w-24 px-2 py-1 bg-slate-900 border border-sky-500/60 rounded
+                         text-slate-100 font-mono text-sm text-right
+                         focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+                />
+                <span
+                  v-else
+                  @click="startEdit(w.id, 'cost_price', w.cost_price)"
+                  :class="[
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    w.cost_price != null ? 'text-slate-200' : 'text-slate-600',
+                  ]"
+                  :title="w.cost_price != null ? `当前 ${fmtPrice(w.cost_price)} · 点击修改` : '点击录入成本价'"
+                >
+                  {{ w.cost_price != null ? fmtPrice(w.cost_price) : '+' }}
+                </span>
+              </td>
+
+              <!-- ====== 持仓股：行内编辑 ====== -->
+              <td class="py-3 px-4 text-right font-mono">
+                <input
+                  v-if="isEditing(w.id, 'position')"
+                  v-focus
+                  v-model="editValues[editKey(w.id, 'position')]"
+                  @blur="commitEdit(w.id, 'position')"
+                  @keyup.enter="commitEdit(w.id, 'position')"
+                  @keyup.escape="cancelEdit"
+                  type="number" step="1" min="0"
+                  class="w-24 px-2 py-1 bg-slate-900 border border-sky-500/60 rounded
+                         text-slate-100 font-mono text-sm text-right
+                         focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+                />
+                <span
+                  v-else
+                  @click="startEdit(w.id, 'position', w.position)"
+                  :class="[
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    w.position != null ? 'text-slate-200' : 'text-slate-600',
+                  ]"
+                  :title="w.position != null ? `当前 ${fmtVol(w.position)} 股 · 点击修改` : '点击录入持仓'"
+                >
+                  {{ w.position != null ? fmtVol(w.position) : '+' }}
+                </span>
+              </td>
+
+              <!-- ====== 持仓盈亏 ====== -->
+              <td
+                class="py-3 px-4 text-right font-mono font-semibold"
+                :class="[pnlColorClass(w.floating_pnl), pnlGlowClass(w.floating_pnl)]"
+                :title="w.floating_pnl != null
+                         ? `${w.position} 股 × (现价 ${fmtPrice(w.price)} - 成本 ${fmtPrice(w.cost_price)})`
+                         : '需要同时填入成本价和持仓股才计算盈亏'"
+              >
+                {{ fmtPnl(w.floating_pnl) }}
+              </td>
+
+              <!-- ====== 交易备忘 hover tooltip ====== -->
+              <td class="py-3 px-4 text-center">
+                <span
+                  v-if="w.trade_note"
+                  @mouseenter="showNoteTip($event, w.trade_note)"
+                  @mousemove="moveNoteTip"
+                  @mouseleave="hideNoteTip"
+                  class="cursor-help text-amber-400 hover:text-amber-300 text-base
+                         hover:scale-110 inline-block transition"
+                >📝</span>
+                <span v-else class="text-slate-700 text-xs">—</span>
+              </td>
+
               <td class="py-3 px-4">
                 <span v-if="w.signal?.signals?.is_volume_breakout" class="badge badge-breakout">
                   🔥 放量突破
@@ -522,12 +790,32 @@ onUnmounted(() => {
             </tr>
           </tbody>
         </table>
+        <p v-if="editError" class="px-5 py-2 text-rose-400 text-xs font-mono">
+          行内编辑失败：{{ editError }}
+        </p>
       </div>
     </section>
 
     <footer class="mt-6 text-center text-xs text-slate-600 font-mono">
-      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF
+      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 交易备忘 v1.1
     </footer>
+
+    <!-- ====================== 交易备忘 hover tooltip（v1.1）====================== -->
+    <Teleport to="body">
+      <div
+        v-if="noteTip"
+        class="note-tip"
+        :style="{ left: noteTip.x + 'px', top: noteTip.y + 'px' }"
+        role="tooltip"
+      >
+        <div class="text-xs text-amber-300/80 mb-1 font-mono uppercase tracking-wider">
+          交易逻辑
+        </div>
+        <div class="text-slate-100 text-sm leading-relaxed whitespace-pre-wrap max-w-xs">
+          {{ noteTip.text }}
+        </div>
+      </div>
+    </Teleport>
 
     <!-- ====================== K 线模态框：毛玻璃 + 渐变边框 ====================== -->
     <Teleport to="body">

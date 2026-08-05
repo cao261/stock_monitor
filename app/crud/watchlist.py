@@ -40,14 +40,9 @@ class CRUDWatchlist:
         return int(db.execute(stmt).scalar_one())
 
     def create(self, db: Session, obj_in: WatchlistCreate) -> Watchlist:
-        db_obj = Watchlist(
-            ts_code=obj_in.ts_code,
-            name=obj_in.name,
-            exchange=obj_in.exchange,
-            market=obj_in.market,
-            industry=obj_in.industry,
-            is_active=obj_in.is_active,
-        )
+        # 用 model_dump 拿全字段，新增的持仓字段自动包含（v1.1）
+        data = obj_in.model_dump()
+        db_obj = Watchlist(**data)
         db.add(db_obj)
         db.commit()
         db.refresh(db_obj)
