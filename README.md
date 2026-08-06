@@ -1,4 +1,4 @@
-# A-Stock Sentiment Monitor v2.1
+# A-Stock Sentiment Monitor v2.2
 
 A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
@@ -331,6 +331,44 @@ v2.1 用 `mainSeries.createPriceLine()` 把 cost / target_win / target_loss 画�
 2. 点「走势」打开 K 线
 3. 看到 3 条水平虚线（灰/红/绿），右轴 label 自动带百分比
 4. 行内编辑改一下成本价，K 线上的水平线立即更新（不用关模态框）
+
+## 实时异动雷达（v2.2）+ 模态框重载修复
+
+### 修复 K 线模态框重开不刷新
+
+之前关模态框再开同一只股票，Vue diff 跳过 onMounted，旧 chart 实例不会重建，
+持仓信息变化时水平参考线也不会更新。v2.2 修复：
+
+- `chartKey = ref(0)`
+- 每次 `openChart` 触发 `chartKey.value = Date.now()`
+- `<KLineChart :key="chartKey" ...>` 强制 Vue 把组件当全新实例处理
+
+### 实时异动雷达
+
+**后端** `GET /api/market/top?sort_by=&limit=`
+
+- `sort_by` 支持 `change_pct`（涨跌幅）/ `volume`（成交量）
+- 默认 20，可调 1~200
+- 过滤掉 `change_pct` / `volume` 为 null 的脏数据
+- 排序降序返回
+
+**前端** Dashboard 新增「🔥 实时异动雷达」section（自选股盯盘表下方）
+
+- 5s 轮询拉数据，跟自选股主表同节奏
+- 5 列自适应 grid（手机 2 / 平板 3 / 桌面 5）
+- 每行：排名 + 名称 + 现价 + 涨跌幅（红绿）
+- 前 3 名加红高亮
+- **点击行直接弹 K 线模态框** —— 在雷达发现异动牛股 → 一键看 K 线 + 持仓参考线
+
+### 验证
+
+`_test_top.py` 4/4：
+- change_pct 排序：sh603468 +117.81% / sz301251 +20.01% / sz300903 +20.00%（涨停）
+- volume 排序：sz000725 16.8 亿股 / sz002131 9.3 亿股
+- limit=50 → 50
+- 非法 sort_by → 422
+
+Build: ✓ 389.94 KB JS / 36.89 KB CSS
 
 ## ETF support
 

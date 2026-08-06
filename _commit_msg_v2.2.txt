@@ -1,0 +1,32 @@
+feat(v2.2): 实时异动雷达 + 修复 K 线模态框重载 Bug
+
+Bug 修复：
+- 关 K 线模态框再开同一只股票 → Vue diff 跳过 onMounted → 旧 chart 残留
+- 修复：chartKey = ref(0) + openChart 时 chartKey.value = Date.now()
+- 模板：<KLineChart :key="chartKey" ...> 强制重建
+
+新功能：实时异动雷达
+
+后端 (app/routers/market.py)：
+- GET /api/market/top?sort_by=change_pct|volume&limit=20
+- 复用 get_all_stocks()（已过滤 __meta__）
+- 过滤 None 数据，避免 0 跟 null 混排
+- 排序降序
+- sort_by 用 Pydantic pattern 限制枚举值，非法 → 422
+
+前端 (api/index.js + Dashboard.vue)：
+- getTopMovers(params) API 封装
+- 5s 轮询（与主表同节奏）
+- 新增「🔥 实时异动雷达」section
+- 5 列自适应 grid（2/3/4/5 列响应）
+- 前 3 名红高亮
+- 列表行：排名 + 名称 + 现价 + 涨跌幅（红绿）
+- 点击行直接 openChart() 弹 v2.1 K 线模态框
+
+测试 _test_top.py 4/4：
+- change_pct 排序正确：sh603468 +117.81%（涨停）
+- volume 排序正确：sz000725 16.8 亿股
+- limit=50 正常
+- 非法 sort_by → 422
+
+Build: ✓ 389.94 KB JS / 36.89 KB CSS

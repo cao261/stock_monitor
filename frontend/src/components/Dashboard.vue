@@ -5,6 +5,7 @@ import {
   getFundFlow,
   getSentiment,
   getSignals,
+  getTopMovers,
   getWatchlist,
   refreshHistory,
   removeFromWatchlist,
@@ -49,6 +50,15 @@ const chartName = ref('')
 const chartCost = ref(null)
 const chartTargetWin = ref(null)
 const chartTargetLoss = ref(null)
+// v2.2: 强制 KLineChart 重建的 key（每次 openChart 自增）
+// 解决「关模态框再开同一只股票 → Vue diff 跳过 onMounted → 旧 chart 残留」bug
+const chartKey = ref(0)
+
+// v2.2: 实时异动雷达（默认涨跌幅榜）
+const radar = ref([])         // Top 20 涨幅榜
+const radarLoading = ref(false)
+const RADAR_INTERVAL_MS = 5_000  // 跟主表同步刷新
+const RADAR_LIMIT = 20
 
 // 行内编辑（v1.1）: 哪一行 + 哪个字段正在被编辑
 const editingCell = ref(null)  // { id, field } | null
@@ -394,6 +404,8 @@ function openChart(code, name, cost = null, win = null, loss = null) {
   chartCost.value = cost
   chartTargetWin.value = win
   chartTargetLoss.value = loss
+  // v2.2: 强制重置 KLineChart 组件（解决重开同一只股票不刷新的问题）
+  chartKey.value = Date.now()
 }
 function closeChart() {
   chartCode.value = null
@@ -451,6 +463,7 @@ async function requestNotifyPermission() {
 let pollTimer = null
 let clockTimer = null
 let fundFlowTimer = null
+let radarTimer = null  // v2.2
 async function refreshFundFlow() {
   fundFlowLoading.value = true
   try {
@@ -463,12 +476,27 @@ async function refreshFundFlow() {
     fundFlowLoading.value = false
   }
 }
+// v2.2: 实时异动雷达
+async function refreshRadar() {
+  radarLoading.value = true
+  try {
+    const r = await getTopMovers({ sort_by: 'change_pct', limit: RADAR_LIMIT })
+    radar.value = Array.isArray(r.data) ? r.data : []
+  } catch (e) {
+    // 雷达失败不打断主表
+    console.warn('radar refresh failed:', e.message)
+  } finally {
+    radarLoading.value = false
+  }
+}
 onMounted(() => {
   requestNotifyPermission()
   refresh()
   refreshFundFlow()  // 立即拉一次
+  refreshRadar()     // 立即拉一次
   pollTimer = setInterval(refresh, REFRESH_INTERVAL_MS)
   fundFlowTimer = setInterval(refreshFundFlow, FUND_FLOW_INTERVAL_MS)
+  radarTimer = setInterval(refreshRadar, RADAR_INTERVAL_MS)  // v2.2
   clockTimer = setInterval(() => { now.value = Date.now() }, 1000)
   window.addEventListener('keydown', onKeyDown)
 })
@@ -476,6 +504,7 @@ onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
   if (clockTimer) clearInterval(clockTimer)
   if (fundFlowTimer) clearInterval(fundFlowTimer)
+  if (radarTimer) clearInterval(radarTimer)  // v2.2
   window.removeEventListener('keydown', onKeyDown)
 })
 </script>
@@ -1026,8 +1055,62 @@ onUnmounted(() => {
       </div>
     </section>
 
+    <!-- ====================== 实时异动雷达（v2.2）====================== -->
+    <section class="glass mt-4 overflow-hidden">
+      <div class="px-5 py-3 flex items-center justify-between border-b border-slate-700/40">
+        <h2 class="text-sm font-semibold text-slate-200 tracking-wide">
+          🔥 实时异动雷达
+          <span class="text-slate-500 font-normal ml-2 font-mono">
+            涨幅榜 Top {{ RADAR_LIMIT }} · 每 5s 刷新
+          </span>
+        </h2>
+        <span class="text-xs text-slate-600 hidden md:inline font-mono">
+          点击名称 / 代码 → 弹出 K 线
+        </span>
+      </div>
+      <div v-if="!radar.length" class="p-8 text-center text-slate-500 text-sm">
+        {{ radarLoading ? '拉取中…' : '暂无数据' }}
+      </div>
+      <div
+        v-else
+        class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5
+               divide-x divide-y divide-slate-700/30"
+      >
+        <div
+          v-for="(r, i) in radar"
+          :key="r.code"
+          @click="openChart(r.code, r.name, null, null, null)"
+          class="px-3 py-2 cursor-pointer hover:bg-slate-700/40 transition
+                 group relative"
+          :title="`${r.name || r.code} · 点击查看 K 线`"
+        >
+          <!-- 排名角标 -->
+          <div class="flex items-baseline gap-1.5">
+            <span
+              class="text-[10px] font-mono tabular-nums"
+              :class="i < 3 ? 'text-rose-400 font-bold' : 'text-slate-600'"
+            >{{ String(i + 1).padStart(2, '0') }}</span>
+            <span class="text-xs text-slate-200 truncate group-hover:text-sky-300 transition">
+              {{ r.name || r.code }}
+            </span>
+          </div>
+          <div class="flex items-baseline justify-between mt-0.5">
+            <span class="font-mono text-[11px] text-slate-500 tabular-nums">
+              {{ r.price != null ? r.price.toFixed(2) : '-' }}
+            </span>
+            <span
+              class="font-mono text-[11px] font-semibold tabular-nums"
+              :class="r.change_pct > 0 ? 'text-rose-400' : r.change_pct < 0 ? 'text-emerald-400' : 'text-slate-500'"
+            >
+              {{ r.change_pct > 0 ? '+' : '' }}{{ r.change_pct.toFixed(2) }}%
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="mt-6 text-center text-xs text-slate-600 font-mono">
-      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v1.2
+      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v2.2
     </footer>
 
     <!-- ====================== 交易备忘 hover tooltip（v1.1）====================== -->
@@ -1081,6 +1164,7 @@ onUnmounted(() => {
             >×</button>
           </div>
           <KLineChart
+            :key="chartKey"
             :ts-code="chartCode"
             :cost-price="chartCost"
             :target-win="chartTargetWin"

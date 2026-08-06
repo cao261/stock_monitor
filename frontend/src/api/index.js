@@ -126,4 +126,14 @@ export function getFundFlow(params = {}) {
   return api.get('/market/fund-flow', { params })
 }
 
+/**
+ * 全市场排行榜（v2.2 异动雷达用）
+ * GET /market/top?sort_by=change_pct|volume&limit=20
+ * sort_by: 'change_pct' 涨跌幅 / 'volume' 成交量
+ * 返回 Top N [{code, name, price, change_pct, volume, ...}]
+ */
+export function getTopMovers(params = {}) {
+  return api.get('/market/top', { params })
+}
+
 export default api

@@ -50,6 +50,41 @@ def get_top_gainers(
 
 
 @router.get(
+    "/top",
+    response_model=list[StockSnapshot],
+    summary="全市场排行榜（v2.2：异动雷达用）",
+)
+def get_top_movers(
+    sort_by: str = Query(
+        "change_pct",
+        pattern="^(change_pct|volume)$",
+        description="排序字段：change_pct=涨跌幅，volume=成交量",
+    ),
+    limit: int = Query(20, ge=1, le=200, description="取前 N 只"),
+) -> list[dict[str, Any]]:
+    """统一的全市场排行榜：支持按涨跌幅 / 成交量排序。
+
+    过滤掉缺数据的（change_pct / volume 为 None 的），
+    避免 0 跟 null 混排导致无意义的名次。
+    """
+    all_stocks = mf.get_all_stocks()
+    if sort_by == "change_pct":
+        # 涨跌幅：从大到小，过滤 None
+        items = [
+            (code, d) for code, d in all_stocks.items()
+            if d.get("change_pct") is not None
+        ]
+        items.sort(key=lambda kv: kv[1]["change_pct"], reverse=True)
+    else:  # volume
+        items = [
+            (code, d) for code, d in all_stocks.items()
+            if d.get("volume") is not None and d.get("volume", 0) > 0
+        ]
+        items.sort(key=lambda kv: kv[1]["volume"], reverse=True)
+    return [{"code": code, **data} for code, data in items[:limit]]
+
+
+@router.get(
     "/top/losers",
     response_model=list[StockSnapshot],
     summary="跌幅榜 Top N",
