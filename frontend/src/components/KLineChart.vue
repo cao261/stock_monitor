@@ -4,12 +4,17 @@ import {
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
+  LineStyle,
   createChart,
 } from 'lightweight-charts'
 import { getStockHistory } from '../api'
 
 const props = defineProps({
   tsCode: { type: String, required: true },
+  // v2.1: 持仓 / 止盈止损水平参考线（K 线上画线）
+  costPrice: { type: Number, default: null },
+  targetWin: { type: Number, default: null },
+  targetLoss: { type: Number, default: null },
 })
 
 const container = ref(null)
@@ -36,6 +41,11 @@ let ma20Series = null
 let resizeObserver = null
 let klinesData = []  // 保存原始 klines 用于 legend 计算
 
+// v2.1: price line 句柄，用于 props 变化时移除旧线
+let costLine = null
+let winLine = null
+let lossLine = null
+
 // ====================== 计算 MA ======================
 function calcMA(closes, period) {
   const out = []
@@ -50,6 +60,68 @@ function calcMA(closes, period) {
   }
   // 过滤掉 null（lightweight-charts 喜欢连续点，但允许少量 null）
   return out.filter(p => p.value != null)
+}
+
+// ====================== 持仓 / 止盈止损参考线（v2.1）======================
+function clearPriceLines() {
+  // 移除旧的参考线（props 变化或重渲染时调用）
+  for (const ln of [costLine, winLine, lossLine]) {
+    if (ln && mainSeries) {
+      try { mainSeries.removePriceLine(ln) } catch (_) { /* 已被 chart 释放 */ }
+    }
+  }
+  costLine = null
+  winLine = null
+  lossLine = null
+}
+
+function renderPriceLines() {
+  if (!mainSeries) return
+  clearPriceLines()
+  const { costPrice, targetWin, targetLoss } = props
+  // 成本价（中性色 + 百分比 Label）
+  if (costPrice != null && costPrice > 0) {
+    costLine = mainSeries.createPriceLine({
+      price: costPrice,
+      color: '#94a3b8',         // slate-400
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: '成本',
+    })
+  }
+  // 止盈价（红 + 相对成本幅度）
+  if (targetWin != null && targetWin > 0) {
+    let title = '止盈'
+    if (costPrice > 0) {
+      const pct = ((targetWin - costPrice) / costPrice) * 100
+      title = `止盈 ${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
+    }
+    winLine = mainSeries.createPriceLine({
+      price: targetWin,
+      color: '#ef4444',         // 涨红
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title,
+    })
+  }
+  // 止损价（绿 + 相对成本幅度）
+  if (targetLoss != null && targetLoss > 0) {
+    let title = '止损'
+    if (costPrice > 0) {
+      const pct = ((targetLoss - costPrice) / costPrice) * 100
+      title = `止损 ${pct.toFixed(1)}%`
+    }
+    lossLine = mainSeries.createPriceLine({
+      price: targetLoss,
+      color: '#22c55e',         // 跌绿
+      lineWidth: 1,
+      lineStyle: LineStyle.Dashed,
+      axisLabelVisible: true,
+      title,
+    })
+  }
 }
 
 // ====================== 初始化 ======================
@@ -70,6 +142,7 @@ async function loadAndRender() {
 function render(data) {
   // 销毁旧实例
   if (chart) {
+    clearPriceLines()  // v2.1: 显式清旧 line 句柄
     chart.remove()
     chart = null
   }
@@ -174,6 +247,9 @@ function render(data) {
     chart.timeScale().setVisibleLogicalRange({ from: lastIdx - 60, to: lastIdx + 2 })
   }
 
+  // v2.1: 持仓 / 止盈止损水平参考线（K 线画好了再画，不然找不到 mainSeries）
+  renderPriceLines()
+
   // ====================== 十字光标 Legend 联动 ======================
   chart.subscribeCrosshairMove(param => {
     if (!param.time || param.point == null) {
@@ -263,12 +339,24 @@ watch(() => props.tsCode, () => {
   loadAndRender()
 })
 
+// v2.1: 持仓 / 止盈止损值变了，不需要重拉历史，只重画参考线
+watch(
+  () => [props.costPrice, props.targetWin, props.targetLoss],
+  () => {
+    renderPriceLines()
+  },
+  { deep: true },
+)
+
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
   if (resizeObserver) {
     resizeObserver.disconnect()
     resizeObserver = null
   }
+  // v2.1: 先释放 price line 句柄（chart.remove() 也会清，但显式清更稳）
+  clearPriceLines()
+  mainSeries = null
   if (chart) {
     chart.remove()
     chart = null

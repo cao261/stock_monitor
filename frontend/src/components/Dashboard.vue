@@ -45,6 +45,10 @@ const sortDir = ref('desc')
 // K 线模态框
 const chartCode = ref(null)
 const chartName = ref('')
+// v2.1: 持仓 / 止盈止损参考线（K 线上画水平线用）
+const chartCost = ref(null)
+const chartTargetWin = ref(null)
+const chartTargetLoss = ref(null)
 
 // 行内编辑（v1.1）: 哪一行 + 哪个字段正在被编辑
 const editingCell = ref(null)  // { id, field } | null
@@ -383,9 +387,13 @@ async function onRemove(id) {
   }
 }
 
-function openChart(code, name) {
+function openChart(code, name, cost = null, win = null, loss = null) {
   chartCode.value = code
   chartName.value = name || code
+  // v2.1: 把持仓信息也带过去，KLineChart 画水平参考线用
+  chartCost.value = cost
+  chartTargetWin.value = win
+  chartTargetLoss.value = loss
 }
 function closeChart() {
   chartCode.value = null
@@ -741,7 +749,7 @@ onUnmounted(() => {
             <tr>
               <th class="text-left py-3 px-4 font-medium">代码</th>
               <th class="text-left py-3 px-4 font-medium cursor-pointer hover:text-sky-300 transition"
-                  @click="openChart(watchlist[0]?.ts_code, watchlist[0]?.name)"
+                  @click="openChart(watchlist[0]?.ts_code, watchlist[0]?.name, watchlist[0]?.cost_price, watchlist[0]?.target_win, watchlist[0]?.target_loss)"
                   title="点击查看第一只的 K 线">名称</th>
               <th class="text-right py-3 px-4 font-medium">现价</th>
               <th
@@ -789,7 +797,7 @@ onUnmounted(() => {
               <td class="py-3 px-4 font-mono text-sky-300">{{ w.ts_code }}</td>
               <td
                 class="py-3 px-4 text-slate-200 cursor-pointer hover:text-sky-300 transition font-medium"
-                @click="openChart(w.ts_code, w.name || w.name_from_market)"
+                @click="openChart(w.ts_code, w.name || w.name_from_market, w.cost_price, w.target_win, w.target_loss)"
                 title="点击查看 K 线"
               >
                 {{ w.name || w.name_from_market || '-' }}
@@ -1001,7 +1009,7 @@ onUnmounted(() => {
               </td>
               <td class="py-3 px-4 text-right whitespace-nowrap">
                 <button
-                  @click="openChart(w.ts_code, w.name || w.name_from_market)"
+                  @click="openChart(w.ts_code, w.name || w.name_from_market, w.cost_price, w.target_win, w.target_loss)"
                   class="text-sky-400 hover:text-sky-300 text-xs mr-3 transition font-medium"
                 >走势</button>
                 <button
@@ -1072,7 +1080,12 @@ onUnmounted(() => {
                      hover:bg-slate-800/60 transition"
             >×</button>
           </div>
-          <KLineChart :ts-code="chartCode" />
+          <KLineChart
+            :ts-code="chartCode"
+            :cost-price="chartCost"
+            :target-win="chartTargetWin"
+            :target-loss="chartTargetLoss"
+          />
         </div>
       </div>
     </Teleport>

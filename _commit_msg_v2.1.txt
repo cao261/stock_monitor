@@ -1,0 +1,24 @@
+feat(v2.1): K 线图上画持仓 / 止盈止损水平参考线
+
+让"交易计划"在 K 线上可视化：
+- 成本价（灰虚线，slate-400，title="成本"）
+- 止盈价（红虚线，#ef4444，title="止盈 +X.X%" —— 相对成本的收益率）
+- 止损价（绿虚线，#22c55e，title="止损 -X.X%"）
+
+KLineChart.vue：
+- 加 costPrice / targetWin / targetLoss 三个 props
+- 引入 LineStyle（lightweight-charts v5 export）
+- renderPriceLines() 用 mainSeries.createPriceLine 画 3 条
+- 止盈/止损 label 自动算相对成本的幅度（公式 (target-cost)/cost*100）
+- clearPriceLines() 处理三处清理：props 变化、render 重入、onUnmounted
+- watch([costPrice, targetWin, targetLoss]) props 变了只重画参考线，不重拉历史
+
+Dashboard.vue：
+- chartCode / chartName 旁边加 chartCost / chartTargetWin / chartTargetLoss ref
+- openChart(code, name, cost, win, loss) 签名扩展
+- 3 个调用点（表头名称 / 名称 td / 走势按钮）都传 w 的 cost_price / target_win / target_loss
+- <KLineChart> 模板传 3 个新 props
+
+数据流：watchlist 行 → openChart → 3 个 ref → KLineChart props → createPriceLine
+
+Build: ✓ 387.77 KB JS / 34.51 KB CSS

@@ -1,4 +1,4 @@
-# A-Stock Sentiment Monitor v2.0
+# A-Stock Sentiment Monitor v2.1
 
 A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
@@ -295,6 +295,42 @@ last date:  2026-08-06
 last kline close = realtime price ? True
 last kline date = realtime date ? True
 ```
+
+## K-line chart v2.1 — 持仓 / 止盈止损水平参考线
+
+v2.0 把 K 线变专业了，但还缺最实战的一环：把『交易计划』直接画到 K 线上。
+v2.1 用 `mainSeries.createPriceLine()` 把 cost / target_win / target_loss 画成水平虚线，
+一眼能看到「现在到止盈还有多远」「有没有破止损」。
+
+### 数据流
+
+- `Dashboard.vue` 三个 openChart 调用点（表头 / 名称列 / 走势按钮）现在都把
+  `w.cost_price` / `w.target_win` / `w.target_loss` 传进去
+- `KLineChart.vue` 接收 3 个 props，加 2 个 ref 缓存
+  `chartCost` / `chartTargetWin` / `chartTargetLoss`
+
+### 价格线渲染（v2.1 核心）
+
+- 成本价：浅灰 `#94a3b8`、lineWidth=1、LineStyle.Dashed，title="成本"
+- 止盈价：涨红 `#ef4444`、lineWidth=1、LineStyle.Dashed，title="止盈 +15.2%"
+  （+15.2% 是相对成本价的收益率，自动算）
+- 止损价：跌绿 `#22c55e`、lineWidth=1、LineStyle.Dashed，title="止损 -7.8%"
+
+### 生命周期
+
+- `watch([props.costPrice, props.targetWin, props.targetLoss])` → 持仓信息变了不用重拉历史，
+  只调 `renderPriceLines()` 即可（先 clear 旧线再画新线，避免残影）
+- `render()` 开头 `chart.remove()` 前显式 `clearPriceLines()` 清句柄
+- `onUnmounted` 同样清一遍，避免内存泄漏
+
+### 验证
+
+`_test_v13.py` 已经覆盖后端字段存在；前端 build 通过（387.77 KB JS / 34.51 KB CSS）。
+手动测试：
+1. 在 dashboard 加一只股票，填成本 10 / 止盈 12 / 止损 9
+2. 点「走势」打开 K 线
+3. 看到 3 条水平虚线（灰/红/绿），右轴 label 自动带百分比
+4. 行内编辑改一下成本价，K 线上的水平线立即更新（不用关模态框）
 
 ## ETF support
 
