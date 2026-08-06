@@ -129,12 +129,12 @@ async def get_market_history(code: str) -> dict[str, Any]:
     """
     code_norm = code.strip().lower()
     h = mf.get_history(code_norm)
-    data_records = h.get("data") or []
+    data_records = list(h.get("data") or [])  # copy 以便追加当日实时 K 线
     if not data_records:
         # cache miss：实时拉一次
         await mf.fetch_history_for_codes([code_norm], concurrency=1)
         h = mf.get_history(code_norm)
-        data_records = h.get("data") or []
+        data_records = list(h.get("data") or [])
     if not data_records:
         raise HTTPException(
             status_code=404,
@@ -142,6 +142,33 @@ async def get_market_history(code: str) -> dict[str, Any]:
                 f"{code_norm} 无历史数据，请先调 POST /market/history/refresh 拉取"
             ),
         )
+    # ===== v2.0: 拼装当日实时 K 线 =====
+    # 历史接口盘中不更新，腾讯免费接口盘后才出当天 K 线。
+    # 用 all_stocks_cache 里的实时切片（每 5 秒刷一次）合成最后一根 K 线，
+    # 让图表和外面显示的现价永远一致。
+    last_date = data_records[-1]["date"]
+    realtime = mf.get_stock(code_norm) or {}
+    rt_date = realtime.get("quote_date") or ""
+    rt_price = realtime.get("price")
+    if rt_date and rt_date != last_date and rt_price and rt_price > 0:
+        # 用 实时 open / 实时 high / 实时 low / 实时 price 当 close
+        rt_open = realtime.get("open") or 0
+        rt_high = realtime.get("high") or 0
+        rt_low = realtime.get("low") or 0
+        # 防御：实时 high < price 时，把 price 算进去；实时 low > price 时同理
+        high = max(rt_high, rt_price) if rt_high > 0 else rt_price
+        low = min(rt_low, rt_price) if rt_low > 0 else rt_price
+        # volume 单位是"股"，要除 100 转成"手"（与 fetch_history 一致）
+        vol_lots = (realtime.get("volume") or 0) / 100.0
+        data_records.append({
+            "date": rt_date,
+            "open": rt_open,
+            "high": high,
+            "low": low,
+            "close": rt_price,
+            "volume_lots": vol_lots,
+            "amount": realtime.get("amount") or 0,
+        })
     klines: list[dict[str, Any]] = []
     volumes: list[dict[str, Any]] = []
     for r in data_records:

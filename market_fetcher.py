@@ -52,7 +52,7 @@ TENCENT_HEADERS = {
     "Referer": "https://gu.qq.com/",
 }
 
-HISTORY_FETCH_DAYS = 10          # 拉几天，保证取到最近 5 个交易日
+HISTORY_FETCH_DAYS = 60          # 拉 60 天（够算 MA20 + 完整月度趋势；增加请求量但 watchlist 最多几十只）
 HISTORY_FETCH_CONCURRENCY = 5    # 拉历史的并发数（避免触发风控）
 HISTORY_REFRESH_INTERVAL_CYCLES = 360  # 5s × 360 = 30 分钟补拉一次历史（处理 watchlist 新增）
 

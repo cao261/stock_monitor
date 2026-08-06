@@ -1,0 +1,26 @@
+feat(v2.0): K 线图精装修 — 60 天历史 + 实时 K 线合成 + MA5/10/20 + 十字光标 Legend
+
+痛点：原 K 线图太"裸"（10 天历史、缺均线、缺十字光标数据、有水印），
+盘中看图最后一根 K 线和外面盯盘表现价对不上。
+
+后端：
+- market_fetcher.HISTORY_FETCH_DAYS: 10 → 60（够算 MA20 + 看月度趋势）
+- /api/market/{code}/history 在返回前拼装当日实时 K 线：
+  - 用 all_stocks_cache 里的实时切片（5s 刷一次）
+  - open = 今开，high/low = 今日最高最低，close = 现价
+  - volume_lots = 股 ÷ 100
+  - 防御性逻辑：实时 high/low 与 price 的 min/max 取并
+  - 重复日期（盘后历史更新）→ 不重复追加
+- 测试 _test_kline.py 输出 61 根 K 线，最后一根 close == 实时价 ✓
+
+前端 KLineChart.vue：
+- MA5 / MA10 / MA20 三根均线，颜色白/黄/紫（lightweight-charts v5 addSeries(LineSeries)）
+- 十字光标 Legend（HTML glass overlay，左上角悬浮）：
+  - subscribeCrosshairMove 监听
+  - 动态显示日期 / OHLC / 涨跌幅 / MA 数值
+  - 涨红跌绿
+- 隐藏 TradingView watermark（chart.applyOptions({ watermark: { visible: false } })）
+- 默认显示最近 60 个交易日（之前 30）
+
+注意：任务 2-4（watchlist 字段 / analyzer / 行内编辑 / 6位归一化）已在
+v1.1 / v1.2 / v1.3 完成并推送。这次只做"任务 1"K 线升级。

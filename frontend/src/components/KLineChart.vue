@@ -1,8 +1,9 @@
 <script setup>
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   CandlestickSeries,
   HistogramSeries,
+  LineSeries,
   createChart,
 } from 'lightweight-charts'
 import { getStockHistory } from '../api'
@@ -15,10 +16,41 @@ const container = ref(null)
 const errorMsg = ref('')
 const loading = ref(false)
 
+// ====================== 十字光标 Legend ======================
+const hover = ref(null)        // 当前十字光标指向的 K 线数据
+const showHover = ref(false)   // 是否显示 legend
+
+// MA 颜色：白 / 黄 / 紫
+const MA_COLORS = {
+  ma5: '#ffffff',
+  ma10: '#facc15',
+  ma20: '#c084fc',
+}
+
 let chart = null
 let mainSeries = null
 let volSeries = null
+let ma5Series = null
+let ma10Series = null
+let ma20Series = null
 let resizeObserver = null
+let klinesData = []  // 保存原始 klines 用于 legend 计算
+
+// ====================== 计算 MA ======================
+function calcMA(closes, period) {
+  const out = []
+  for (let i = 0; i < closes.length; i++) {
+    if (i < period - 1) {
+      out.push({ time: null, value: null })
+      continue
+    }
+    let sum = 0
+    for (let j = i - period + 1; j <= i; j++) sum += closes[j]
+    out.push({ time: closes[i].time, value: sum / period })
+  }
+  // 过滤掉 null（lightweight-charts 喜欢连续点，但允许少量 null）
+  return out.filter(p => p.value != null)
+}
 
 // ====================== 初始化 ======================
 async function loadAndRender() {
@@ -45,6 +77,7 @@ function render(data) {
     errorMsg.value = '无历史数据'
     return
   }
+  klinesData = data.klines
 
   // ====================== 创建图表 ======================
   chart = createChart(container.value, {
@@ -72,6 +105,8 @@ function render(data) {
       vertLine: { color: '#475569', width: 1, style: 3 },
       horzLine: { color: '#475569', width: 1, style: 3 },
     },
+    // 隐藏 TradingView 水印
+    watermark: { visible: false },
   })
 
   // ====================== 主图：K 线 ======================
@@ -91,6 +126,36 @@ function render(data) {
     scaleMargins: { top: 0.05, bottom: 0.30 },
   })
 
+  // ====================== MA 均线（白/黄/紫）======================
+  // 注意：MA 系列必须挂在主图价格 scale 上（默认行为）
+  const closes = data.klines.map(k => ({ time: k.time, value: k.close }))
+  ma5Series = chart.addSeries(LineSeries, {
+    color: MA_COLORS.ma5,
+    lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  })
+  ma5Series.setData(calcMA(closes, 5))
+
+  ma10Series = chart.addSeries(LineSeries, {
+    color: MA_COLORS.ma10,
+    lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  })
+  ma10Series.setData(calcMA(closes, 10))
+
+  ma20Series = chart.addSeries(LineSeries, {
+    color: MA_COLORS.ma20,
+    lineWidth: 1,
+    priceLineVisible: false,
+    lastValueVisible: false,
+    crosshairMarkerVisible: false,
+  })
+  ma20Series.setData(calcMA(closes, 20))
+
   // ====================== 副图：成交量 ======================
   volSeries = chart.addSeries(HistogramSeries, {
     priceFormat: { type: 'volume' },
@@ -98,17 +163,79 @@ function render(data) {
     color: '#64748b',
   })
   volSeries.priceScale().applyOptions({
-    scaleMargins: { top: 0.75, bottom: 0 },  // 上方 75% 给主图，下方 25% 给自己
+    scaleMargins: { top: 0.75, bottom: 0 },  // 上方 75% 给主图，下方 25% 给成交量
   })
   volSeries.setData(data.volumes || [])
 
-  // 默认显示最近 30 个交易日
+  // 默认显示最近 60 个交易日
   chart.timeScale().fitContent()
   const lastIdx = data.klines.length
-  if (lastIdx > 30) {
-    chart.timeScale().setVisibleLogicalRange({ from: lastIdx - 30, to: lastIdx + 2 })
+  if (lastIdx > 60) {
+    chart.timeScale().setVisibleLogicalRange({ from: lastIdx - 60, to: lastIdx + 2 })
   }
+
+  // ====================== 十字光标 Legend 联动 ======================
+  chart.subscribeCrosshairMove(param => {
+    if (!param.time || param.point == null) {
+      showHover.value = false
+      return
+    }
+    // 找到十字光标对应的 K 线
+    const kline = klinesData.find(k => k.time === param.time)
+    if (!kline) {
+      showHover.value = false
+      return
+    }
+    // 计算 MA 值（用 kline 在 closes 里的索引）
+    const idx = klinesData.indexOf(kline)
+    const closes = klinesData.map(k => k.close)
+    const maVal = (period) => {
+      if (idx < period - 1) return null
+      let s = 0
+      for (let j = idx - period + 1; j <= idx; j++) s += closes[j]
+      return s / period
+    }
+    const prevClose = idx > 0 ? klinesData[idx - 1].close : kline.open
+    const chg = kline.close - prevClose
+    const chgPct = prevClose > 0 ? (chg / prevClose) * 100 : 0
+    hover.value = {
+      time: kline.time,
+      open: kline.open,
+      high: kline.high,
+      low: kline.low,
+      close: kline.close,
+      chg,
+      chgPct,
+      ma5: maVal(5),
+      ma10: maVal(10),
+      ma20: maVal(20),
+    }
+    showHover.value = true
+  })
 }
+
+// ====================== Legend 文本格式化 ======================
+const hoverText = computed(() => {
+  if (!hover.value) return null
+  const h = hover.value
+  const fmt = (v) => v == null ? '-' : v.toFixed(2)
+  const sign = (v) => (v > 0 ? '+' : '')
+  return {
+    date: h.time,
+    open: h.open,
+    high: h.high,
+    low: h.low,
+    close: h.close,
+    chg: h.chg,
+    chgPct: h.chgPct,
+    ma5: h.ma5,
+    ma10: h.ma10,
+    ma20: h.ma20,
+    fmt,
+    sign,
+    chgClass: h.chg >= 0 ? 'text-rose-400' : 'text-emerald-400',
+  }
+})
 
 // ====================== resize 自适应 ======================
 function handleResize() {
@@ -150,7 +277,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="relative w-full" style="height: 360px;">
+  <div class="relative w-full" style="height: 420px;">
     <div v-if="loading" class="absolute inset-0 flex items-center justify-center
                                 text-slate-500 text-sm z-10">
       加载中...
@@ -160,5 +287,29 @@ onUnmounted(() => {
       {{ errorMsg }}
     </div>
     <div ref="container" class="w-full h-full" />
+
+    <!-- ====== 十字光标 Legend（左上角悬浮）====== -->
+    <div
+      v-if="showHover && hoverText"
+      class="absolute top-2 left-2 z-20 glass px-3 py-2 text-xs
+             font-mono leading-relaxed pointer-events-none max-w-md"
+    >
+      <div class="text-slate-300 mb-1">{{ hoverText.date }}</div>
+      <div class="text-slate-200">
+        开 {{ hoverText.fmt(hoverText.open) }}
+        高 {{ hoverText.fmt(hoverText.high) }}
+        低 {{ hoverText.fmt(hoverText.low) }}
+        收 {{ hoverText.fmt(hoverText.close) }}
+      </div>
+      <div :class="hoverText.chgClass">
+        {{ hoverText.sign(hoverText.chg) }}{{ hoverText.chg.toFixed(2) }}
+        ({{ hoverText.sign(hoverText.chgPct) }}{{ hoverText.chgPct.toFixed(2) }}%)
+      </div>
+      <div class="flex gap-3 mt-0.5">
+        <span :style="{ color: MA_COLORS.ma5 }">MA5 {{ hoverText.fmt(hoverText.ma5) }}</span>
+        <span :style="{ color: MA_COLORS.ma10 }">MA10 {{ hoverText.fmt(hoverText.ma10) }}</span>
+        <span :style="{ color: MA_COLORS.ma20 }">MA20 {{ hoverText.fmt(hoverText.ma20) }}</span>
+      </div>
+    </div>
   </div>
 </template>

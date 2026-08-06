@@ -1,4 +1,4 @@
-# A-Stock Sentiment Monitor v1.3
+# A-Stock Sentiment Monitor v2.0
 
 A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
@@ -256,6 +256,45 @@ Dashboard 顶部输入框：
 - 输错前缀（`sh999999` 实际是 bj 代码）→ 后端 422，前端红色错误条
 
 测试 `_test_v13.py` 9/9 通过：6 位归一化、前缀 / exchange 错配、重复冲突、非法格式。
+
+## K-line chart v2.0 — 60 天 + 实时合成 + MA + 十字光标 Legend
+
+之前的 K 线图被人吐槽"裸 K"——历史太短、缺均线、缺十字光标数据、水印碍眼。v2.0 一次解决。
+
+### 后端
+
+- `HISTORY_FETCH_DAYS`: 10 → **60**（够算 MA20 + 看月度趋势）
+- `/api/market/{code}/history` **拼装当日实时 K 线**：
+  历史接口盘中不更新，免费腾讯接口盘后才出当天 K。
+  现在用 `all_stocks_cache` 里的实时切片（每 5 秒刷）合成最后一根 K 线
+  （open = 今开，high/low = 今日最高最低，close = 现价，volume_lots = 股数 ÷ 100），
+  跟外面盯盘表的现价永远一致。
+- 防御：
+  - 实时 high < price → 把 price 算进 high
+  - 实时 low > price → 把 price 算进 low
+  - volume 单位转换：股 → 手
+  - 重复日期（盘后历史更新了）→ 用历史那条，不重复追加
+
+### 前端 KLineChart.vue
+
+- **MA5 / MA10 / MA20** 三根移动平均线，颜色白/黄/紫（`addSeries(LineSeries, ...)` v5 API）
+- **十字光标 Legend overlay**（HTML 玻璃卡片，左上角悬浮）：
+  - 监听 `chart.subscribeCrosshairMove`
+  - 显示日期、OHLC、涨跌额 / 涨幅%、MA5/10/20 当前值
+  - 涨红跌绿（沿用 A 股约定）
+- **隐藏 TradingView 水印**：`chart.applyOptions({ watermark: { visible: false } })`
+- 默认显示最近 60 个交易日（之前是 30）
+
+### 验证
+
+`_test_kline.py` 输出：
+```
+total klines: 61
+first date: 2026-05-13
+last date:  2026-08-06
+last kline close = realtime price ? True
+last kline date = realtime date ? True
+```
 
 ## ETF support
 
