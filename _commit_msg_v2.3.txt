@@ -1,0 +1,37 @@
+feat(v2.3): 今日复盘战报 + 收盘自动通知
+
+盘中报警解决"看"，盘后复盘解决"懂"。v2.3 把这两块连起来。
+
+后端 (app/routers/strategy.py):
+- 新增 GET /api/strategy/daily-summary
+- 大盘情绪：score / up_count / down_count / up_ratio / 涨跌停
+- 自选股战况：胜/负/观望只数 + 浮动盈亏 + 总收益率 + 止盈/止损触发列表 + 盈亏 Top 5
+- 全市场龙头：涨幅榜 + 成交榜 Top 3（带"亿股"换算）
+- 修复 bug: by_chg/by_vol 之前只 sort 了 values，但解包时用了 (code, d) → too many values to unpack
+  改成保留 (code, d) tuples 后 sort
+
+app/routers/__init__.py + main.py: 挂载 strategy_router
+
+前端 (api/index.js): getDailySummary() 封装
+
+前端 (Dashboard.vue):
+- 顶部新增「📝 今日复盘」按钮（玻璃拟物 + amber 强调色）
+- 4xl 宽大模态框，3 张玻璃卡片：
+  * 📊 大盘情绪：4 列指标（情绪分 / 涨跌 / 涨跌停 / 上涨比）
+  * ⚔️ 自选股战况：核心 3 指标 + 止盈/止损触发标签 + 盈亏 Top 5
+  * 🚀 涨幅榜 + 💰 成交榜：Top 3 各 2 列
+- 所有股票名 / 标签 / 行都可点 → 直接弹 v2.1 K 线模态框
+- 收盘自动触发：每分钟检查一次，工作日 15:00 后
+  * 持久化 summary_notified_date 到 localStorage 防重复
+  * 弹 Notification「🔔 收盘啦！今日 A 股复盘战报已生成，点击查看」
+  * requireInteraction: true 防止通知自动消失
+  * 通知点击 → focus 窗口 + 打开战报模态框
+  * 主页同步打开模态框
+
+测试 _test_summary2.py 全过：
+- sentiment: 62.01 分, 涨 2790 / 跌 2595, 涨停 113 / 跌停 11
+- top_change_pct: sh603468 +114.72%（涨停板）
+- top_volume: sz000725 18.7 亿股
+- 旧 5 个接口全部 200
+
+Build: ✓ 401.57 KB JS / 41.52 KB CSS

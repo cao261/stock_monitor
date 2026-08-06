@@ -136,4 +136,13 @@ export function getTopMovers(params = {}) {
   return api.get('/market/top', { params })
 }
 
+/**
+ * 今日盘后复盘战报（v2.3）
+ * GET /strategy/daily-summary
+ * 返回 { generated_at, sentiment, watchlist_battle, top_movers }
+ */
+export function getDailySummary() {
+  return api.get('/strategy/daily-summary')
+}
+
 export default api

@@ -1,4 +1,4 @@
-# A-Stock Sentiment Monitor v2.2
+# A-Stock Sentiment Monitor v2.3
 
 A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
@@ -369,6 +369,66 @@ v2.1 用 `mainSeries.createPriceLine()` 把 cost / target_win / target_loss 画�
 - 非法 sort_by → 422
 
 Build: ✓ 389.94 KB JS / 36.89 KB CSS
+
+## 今日复盘战报（v2.3）
+
+盘中报警解决"看"的问题，盘后复盘解决"懂"的问题。v2.3 把这两块连起来。
+
+### 后端 `GET /api/strategy/daily-summary`
+
+拼装三大模块：
+
+- **大盘情绪**：调用 `analyzer.calculate_market_sentiment()`，取 score / up_count / down_count / up_ratio / 涨跌停
+- **自选股战况**：遍历 watchlist 表，统计
+  - 持仓胜/负/无持仓只数
+  - 浮动盈亏合计 + 总收益率
+  - 今日止盈 / 止损触发的股票
+  - 盈利 Top 5 / 亏损 Top 5
+- **全市场异动龙头**：复用 `mf.get_all_stocks()` 排序
+  - 涨幅榜 Top 3
+  - 成交榜 Top 3（带"亿股"换算）
+
+返回结构：
+```json
+{
+  "generated_at": "2026-08-06T15:05:40",
+  "sentiment": { "score": 62.01, "up_count": 2790, ... },
+  "watchlist_battle": { "total": 4, "winning_count": 2, "floating_pnl_total": 1234.5, ... },
+  "top_movers": { "by_change_pct": [...], "by_volume": [...] }
+}
+```
+
+### 前端 Dashboard 复盘战报
+
+- 顶部新增「📝 今日复盘」按钮（玻璃拟物 + amber 强调色）
+- 点击弹出 4xl 宽大模态框（max-w-4xl，max-h-85vh 内滚动）
+- 3 张卡片：
+  - **📊 大盘情绪** —— 4 列指标（情绪分 / 涨跌 / 涨跌停 / 上涨比）
+  - **⚔️ 自选股战况** —— 核心指标（盈亏 / 收益率 / 市值成本）+ 止盈/止损触发标签 + 盈亏 Top 5
+  - **🚀 涨幅榜 + 💰 成交榜** —— Top 3 各 2 列
+- 所有股票名 / 标签 / 行都可点 → 直接弹 v2.1 K 线模态框
+
+### 收盘自动触发（任务 3）
+
+前端启动时 + 每分钟检查一次：
+- 当前时间 ≥ 15:00 且为工作日（A 股周一~周五）
+- 当天还没触发过（用 `localStorage.summary_notified_date` 防刷新重复）
+- 满足条件：
+  1. 标记今天为已触发（持久化）
+  2. 弹 Desktop Notification「🔔 收盘啦！今日 A 股复盘战报已生成，点击查看」
+  3. 通知点击 → 自动 focus 窗口 + 打开战报模态框
+  4. 同时主页面也直接打开战报模态框（用户正在看）
+  5. `requireInteraction: true` 防止通知自动消失
+
+### 验证
+
+`_test_summary2.py` 全过：
+- sentiment: score=62.01, up=2790, down=2595, 涨停 113 / 跌停 11
+- top_change_pct: sh603468 +114.72%（涨停板）
+- top_volume: sz000725 18.7 亿股
+- 旧 5 个接口（sentiment / top / fund-flow / watchlist / signals）全部 200
+
+Build: ✓ 401.57 KB JS / 41.52 KB CSS
 
 ## ETF support
 

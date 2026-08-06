@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   addToWatchlist,
+  getDailySummary,
   getFundFlow,
   getSentiment,
   getSignals,
@@ -59,6 +60,15 @@ const radar = ref([])         // Top 20 涨幅榜
 const radarLoading = ref(false)
 const RADAR_INTERVAL_MS = 5_000  // 跟主表同步刷新
 const RADAR_LIMIT = 20
+
+// v2.3: 今日复盘战报
+const summary = ref(null)        // daily-summary 接口返回
+const showSummary = ref(false)   // 模态框可见
+const summaryLoading = ref(false)
+// 每天 15:00 后第一次轮询自动弹通知；用日期 + 标记避免重复触发
+const summaryNotifiedDate = ref('')  // YYYY-MM-DD，已经触发过的日期
+const SUMMARY_AUTO_TRIGGER_HOUR = 15  // 15:00 收盘
+const SUMMARY_CHECK_INTERVAL_MS = 60_000  // 1 分钟检查一次
 
 // 行内编辑（v1.1）: 哪一行 + 哪个字段正在被编辑
 const editingCell = ref(null)  // { id, field } | null
@@ -460,10 +470,66 @@ async function requestNotifyPermission() {
   }
 }
 
+// ====================== v2.3: 复盘战报 ======================
+async function openSummary() {
+  // 模态框立即打开（哪怕没数据），拉数据是异步
+  showSummary.value = true
+  summaryLoading.value = true
+  summary.value = null
+  try {
+    const r = await getDailySummary()
+    summary.value = r.data
+  } catch (e) {
+    // 模态框里显示错误（顶部留 addError 一致风格）
+    summary.value = { error: e.message || '拉取失败' }
+  } finally {
+    summaryLoading.value = false
+  }
+}
+function closeSummary() {
+  showSummary.value = false
+}
+
+// 自动触发：每分钟检查一次，如果当前时间 ≥ 15:00 且今天还没触发过，
+// 弹一次通知 + 把模态框也打开（用户已经看一天盘了）
+function checkSummaryAutoTrigger() {
+  if (typeof window === 'undefined') return
+  const d = new Date()
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  // 已经触发过
+  if (summaryNotifiedDate.value === today) return
+  // 没到 15:00
+  if (d.getHours() < SUMMARY_AUTO_TRIGGER_HOUR) return
+  // 是工作日（A 股市场周一~周五，简单按 0~4）
+  const day = d.getDay()
+  if (day === 0 || day === 6) return
+  // 标记已触发（持久化到 localStorage 防刷新丢失）
+  summaryNotifiedDate.value = today
+  try { localStorage.setItem('summary_notified_date', today) } catch (_) {}
+  // 弹通知
+  if (canNotify()) {
+    try {
+      const n = new Notification('🔔 收盘啦！', {
+        body: '今日 A 股复盘战报已生成，点击查看。',
+        tag: 'daily-summary',
+        requireInteraction: true,
+      })
+      n.onclick = () => {
+        window.focus()
+        openSummary()
+        n.close()
+      }
+    } catch (_) { /* 忽略 */ }
+  }
+  // 同时把模态框也开了（用户大概率正在看）
+  openSummary()
+}
+
 let pollTimer = null
 let clockTimer = null
 let fundFlowTimer = null
 let radarTimer = null  // v2.2
+let summaryCheckTimer = null  // v2.3
 async function refreshFundFlow() {
   fundFlowLoading.value = true
   try {
@@ -497,6 +563,10 @@ onMounted(() => {
   pollTimer = setInterval(refresh, REFRESH_INTERVAL_MS)
   fundFlowTimer = setInterval(refreshFundFlow, FUND_FLOW_INTERVAL_MS)
   radarTimer = setInterval(refreshRadar, RADAR_INTERVAL_MS)  // v2.2
+  // v2.3: 复盘战报自动触发
+  try { summaryNotifiedDate.value = localStorage.getItem('summary_notified_date') || '' } catch (_) {}
+  checkSummaryAutoTrigger()  // 启动时立即检查一次（如果是 15:00 后才刷新页面，立即弹）
+  summaryCheckTimer = setInterval(checkSummaryAutoTrigger, SUMMARY_CHECK_INTERVAL_MS)
   clockTimer = setInterval(() => { now.value = Date.now() }, 1000)
   window.addEventListener('keydown', onKeyDown)
 })
@@ -505,6 +575,7 @@ onUnmounted(() => {
   if (clockTimer) clearInterval(clockTimer)
   if (fundFlowTimer) clearInterval(fundFlowTimer)
   if (radarTimer) clearInterval(radarTimer)  // v2.2
+  if (summaryCheckTimer) clearInterval(summaryCheckTimer)  // v2.3
   window.removeEventListener('keydown', onKeyDown)
 })
 </script>
@@ -530,6 +601,13 @@ onUnmounted(() => {
           class="px-3 py-1.5 glass text-slate-300 hover:text-slate-100
                  hover:border-sky-500/50 text-xs transition"
         >🔔 开启通知</button>
+        <button
+          @click="openSummary"
+          class="px-3 py-1.5 glass text-amber-300 hover:text-amber-100
+                 hover:border-amber-500/50 text-xs transition
+                 border border-amber-500/30"
+          title="查看今日 A 股复盘战报"
+        >📝 今日复盘</button>
         <button
           @click="refresh"
           :disabled="loading"
@@ -1109,8 +1187,270 @@ onUnmounted(() => {
       </div>
     </section>
 
+    <!-- ====================== 复盘战报模态框（v2.3）====================== -->
+    <Teleport to="body">
+      <div
+        v-if="showSummary"
+        class="fixed inset-0 z-50 flex items-center justify-center p-4
+               bg-black/60 backdrop-blur-sm"
+        @click.self="closeSummary"
+      >
+        <div
+          class="relative bg-slate-900/90 backdrop-blur-md rounded-xl
+                 border border-slate-700/60 shadow-2xl
+                 w-full max-w-4xl max-h-[85vh] overflow-y-auto
+                 before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                 before:bg-gradient-to-br before:from-amber-500/30 before:via-purple-500/20 before:to-sky-500/30
+                 before:-z-10 before:pointer-events-none"
+        >
+          <!-- 顶部条 -->
+          <div class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur
+                      flex items-center justify-between px-6 py-4
+                      border-b border-slate-700/40 rounded-t-xl">
+            <div>
+              <h3 class="text-xl font-semibold text-slate-100">
+                📝 今日 A 股复盘战报
+              </h3>
+              <p v-if="summary?.generated_at" class="text-xs text-slate-500 mt-1 font-mono">
+                生成于 {{ summary.generated_at }}
+              </p>
+            </div>
+            <button
+              @click="closeSummary"
+              class="text-slate-500 hover:text-slate-200 text-2xl leading-none
+                     w-8 h-8 flex items-center justify-center rounded
+                     hover:bg-slate-800/60 transition"
+            >×</button>
+          </div>
+
+          <!-- 内容 -->
+          <div v-if="summaryLoading" class="p-12 text-center text-slate-500">
+            拉取战报数据中…
+          </div>
+          <div v-else-if="summary?.error" class="p-12 text-center text-rose-400">
+            拉取失败：{{ summary.error }}
+          </div>
+          <div v-else-if="summary" class="p-6 space-y-4">
+            <!-- ====== 卡片 1: 大盘情绪 ====== -->
+            <div class="glass p-5">
+              <div class="flex items-center gap-2 mb-3">
+                <span class="text-base">📊</span>
+                <h4 class="text-sm font-semibold text-slate-200 tracking-wide">
+                  大盘情绪
+                </h4>
+              </div>
+              <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div>
+                  <p class="text-xs text-slate-500 uppercase tracking-wider">情绪分</p>
+                  <p
+                    class="text-3xl font-bold font-mono mt-1"
+                    :class="(summary.sentiment?.score ?? 50) >= 50 ? 'text-rose-400' : 'text-emerald-400'"
+                  >{{ summary.sentiment?.score?.toFixed?.(1) ?? '-' }}</p>
+                </div>
+                <div>
+                  <p class="text-xs text-slate-500 uppercase tracking-wider">涨 / 跌</p>
+                  <p class="text-2xl font-mono mt-1">
+                    <span class="text-rose-400 font-semibold">{{ summary.sentiment?.up_count ?? 0 }}</span>
+                    <span class="text-slate-600 mx-1">/</span>
+                    <span class="text-emerald-400 font-semibold">{{ summary.sentiment?.down_count ?? 0 }}</span>
+                  </p>
+                </div>
+                <div>
+                  <p class="text-xs text-slate-500 uppercase tracking-wider">涨 / 跌停</p>
+                  <p class="text-2xl font-mono mt-1">
+                    <span class="text-rose-400 font-semibold">{{ summary.sentiment?.limit_up_count ?? 0 }}</span>
+                    <span class="text-slate-600 mx-1">/</span>
+                    <span class="text-emerald-400 font-semibold">{{ summary.sentiment?.limit_down_count ?? 0 }}</span>
+                  </p>
+                </div>
+                <div>
+                  <p class="text-xs text-slate-500 uppercase tracking-wider">上涨比</p>
+                  <p class="text-2xl font-mono mt-1 text-slate-200">
+                    {{ ((summary.sentiment?.up_ratio ?? 0.5) * 100).toFixed(1) }}%
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <!-- ====== 卡片 2: 自选股战况 ====== -->
+            <div class="glass p-5">
+              <div class="flex items-center gap-2 mb-3">
+                <span class="text-base">⚔️</span>
+                <h4 class="text-sm font-semibold text-slate-200 tracking-wide">
+                  自选股战况
+                </h4>
+                <span class="text-xs text-slate-500 ml-2 font-mono">
+                  共 {{ summary.watchlist_battle?.total ?? 0 }} 只 ·
+                  <span class="text-rose-400">{{ summary.watchlist_battle?.winning_count ?? 0 }} 盈</span> /
+                  <span class="text-emerald-400">{{ summary.watchlist_battle?.losing_count ?? 0 }} 亏</span> /
+                  <span class="text-slate-500">{{ summary.watchlist_battle?.no_position_count ?? 0 }} 观望</span>
+                </span>
+              </div>
+              <!-- 核心指标 -->
+              <div class="grid grid-cols-3 gap-3 mb-4">
+                <div class="p-3 rounded bg-slate-950/40 border border-slate-700/40">
+                  <p class="text-xs text-slate-500">浮动盈亏</p>
+                  <p
+                    class="text-xl font-mono font-bold mt-1"
+                    :class="(summary.watchlist_battle?.floating_pnl_total ?? 0) > 0 ? 'text-rose-400' : (summary.watchlist_battle?.floating_pnl_total ?? 0) < 0 ? 'text-emerald-400' : 'text-slate-400'"
+                  >{{ (summary.watchlist_battle?.floating_pnl_total ?? 0) > 0 ? '+' : '' }}{{ summary.watchlist_battle?.floating_pnl_total?.toLocaleString?.() ?? '0.00' }}</p>
+                </div>
+                <div class="p-3 rounded bg-slate-950/40 border border-slate-700/40">
+                  <p class="text-xs text-slate-500">总收益率</p>
+                  <p
+                    class="text-xl font-mono font-bold mt-1"
+                    :class="(summary.watchlist_battle?.total_return_rate ?? 0) > 0 ? 'text-rose-400' : (summary.watchlist_battle?.total_return_rate ?? 0) < 0 ? 'text-emerald-400' : 'text-slate-400'"
+                  >{{ summary.watchlist_battle?.total_return_rate != null ? ((summary.watchlist_battle.total_return_rate > 0 ? '+' : '') + summary.watchlist_battle.total_return_rate.toFixed(2) + '%') : '-' }}</p>
+                </div>
+                <div class="p-3 rounded bg-slate-950/40 border border-slate-700/40">
+                  <p class="text-xs text-slate-500">总市值 / 总成本</p>
+                  <p class="text-sm font-mono mt-1 text-slate-200">
+                    {{ summary.watchlist_battle?.market_total?.toLocaleString?.() ?? '-' }}
+                    <span class="text-slate-600 mx-1">/</span>
+                    {{ summary.watchlist_battle?.cost_total?.toLocaleString?.() ?? '-' }}
+                  </p>
+                </div>
+              </div>
+              <!-- 触发信号 -->
+              <div v-if="(summary.watchlist_battle?.take_profit_triggered?.length ?? 0) > 0" class="mb-3">
+                <p class="text-xs text-emerald-400 font-semibold mb-1.5">🎯 止盈触发</p>
+                <div class="flex flex-wrap gap-2">
+                  <span
+                    v-for="x in summary.watchlist_battle.take_profit_triggered"
+                    :key="`tp-${x.ts_code}`"
+                    @click="openChart(x.ts_code, x.name)"
+                    class="px-2 py-1 rounded bg-emerald-500/15 border border-emerald-500/40
+                           text-xs text-emerald-200 cursor-pointer hover:bg-emerald-500/25 transition"
+                    :title="`点击查看 ${x.name || x.ts_code} K 线`"
+                  >
+                    {{ x.name || x.ts_code }} · 现价 {{ x.price?.toFixed?.(2) }} → 止盈 {{ x.target_win }}
+                  </span>
+                </div>
+              </div>
+              <div v-if="(summary.watchlist_battle?.stop_loss_triggered?.length ?? 0) > 0" class="mb-3">
+                <p class="text-xs text-rose-400 font-semibold mb-1.5">🛡️ 止损触发</p>
+                <div class="flex flex-wrap gap-2">
+                  <span
+                    v-for="x in summary.watchlist_battle.stop_loss_triggered"
+                    :key="`sl-${x.ts_code}`"
+                    @click="openChart(x.ts_code, x.name)"
+                    class="px-2 py-1 rounded bg-rose-500/15 border border-rose-500/40
+                           text-xs text-rose-200 cursor-pointer hover:bg-rose-500/25 transition"
+                    :title="`点击查看 ${x.name || x.ts_code} K 线`"
+                  >
+                    {{ x.name || x.ts_code }} · 现价 {{ x.price?.toFixed?.(2) }} ← 止损 {{ x.target_loss }}
+                  </span>
+                </div>
+              </div>
+              <!-- 盈亏排行 -->
+              <div v-if="(summary.watchlist_battle?.winners?.length ?? 0) > 0" class="mt-3">
+                <p class="text-xs text-rose-400 font-semibold mb-1.5">🏆 盈利 Top 5</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-1.5 text-xs">
+                  <div
+                    v-for="x in summary.watchlist_battle.winners"
+                    :key="`w-${x.ts_code}`"
+                    class="flex items-center justify-between px-2 py-1 rounded
+                           bg-slate-950/30 hover:bg-slate-800/40 cursor-pointer transition"
+                    @click="openChart(x.ts_code, x.name)"
+                  >
+                    <span class="text-slate-300">{{ x.name || x.ts_code }}</span>
+                    <span class="text-rose-400 font-mono font-semibold">
+                      +{{ x.floating_pnl?.toLocaleString?.() ?? x.floating_pnl }}
+                      <span class="text-slate-500 text-[10px] ml-1">({{ x.return_rate?.toFixed?.(2) }}%)</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+              <div v-if="(summary.watchlist_battle?.losers?.length ?? 0) > 0" class="mt-3">
+                <p class="text-xs text-emerald-400 font-semibold mb-1.5">📉 亏损 Top 5</p>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-1.5 text-xs">
+                  <div
+                    v-for="x in summary.watchlist_battle.losers"
+                    :key="`l-${x.ts_code}`"
+                    class="flex items-center justify-between px-2 py-1 rounded
+                           bg-slate-950/30 hover:bg-slate-800/40 cursor-pointer transition"
+                    @click="openChart(x.ts_code, x.name)"
+                  >
+                    <span class="text-slate-300">{{ x.name || x.ts_code }}</span>
+                    <span class="text-emerald-400 font-mono font-semibold">
+                      {{ x.floating_pnl?.toLocaleString?.() ?? x.floating_pnl }}
+                      <span class="text-slate-500 text-[10px] ml-1">({{ x.return_rate?.toFixed?.(2) }}%)</span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- ====== 卡片 3: 异动龙头 ====== -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div class="glass p-5">
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="text-base">🚀</span>
+                  <h4 class="text-sm font-semibold text-slate-200 tracking-wide">
+                    涨幅榜 Top 3
+                  </h4>
+                </div>
+                <div class="space-y-2">
+                  <div
+                    v-for="(x, i) in summary.top_movers?.by_change_pct ?? []"
+                    :key="`c-${x.code}`"
+                    @click="openChart(x.code, x.name)"
+                    class="flex items-center justify-between px-3 py-2 rounded
+                           bg-slate-950/40 hover:bg-slate-800/40 cursor-pointer transition"
+                  >
+                    <div class="flex items-center gap-2">
+                      <span
+                        class="text-xs font-mono w-6 text-center"
+                        :class="i === 0 ? 'text-rose-400 font-bold' : 'text-slate-500'"
+                      >{{ i + 1 }}</span>
+                      <span class="text-slate-200">{{ x.name || x.code }}</span>
+                    </div>
+                    <span class="text-rose-400 font-mono font-semibold">+{{ x.change_pct }}%</span>
+                  </div>
+                  <p v-if="!summary.top_movers?.by_change_pct?.length" class="text-xs text-slate-500 text-center py-3">
+                    暂无数据
+                  </p>
+                </div>
+              </div>
+              <div class="glass p-5">
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="text-base">💰</span>
+                  <h4 class="text-sm font-semibold text-slate-200 tracking-wide">
+                    成交榜 Top 3
+                  </h4>
+                </div>
+                <div class="space-y-2">
+                  <div
+                    v-for="(x, i) in summary.top_movers?.by_volume ?? []"
+                    :key="`v-${x.code}`"
+                    @click="openChart(x.code, x.name)"
+                    class="flex items-center justify-between px-3 py-2 rounded
+                           bg-slate-950/40 hover:bg-slate-800/40 cursor-pointer transition"
+                  >
+                    <div class="flex items-center gap-2">
+                      <span
+                        class="text-xs font-mono w-6 text-center"
+                        :class="i === 0 ? 'text-amber-400 font-bold' : 'text-slate-500'"
+                      >{{ i + 1 }}</span>
+                      <span class="text-slate-200">{{ x.name || x.code }}</span>
+                    </div>
+                    <span class="text-amber-400 font-mono text-xs">
+                      {{ ((x.volume || 0) / 100000000).toFixed(2) }} 亿股
+                    </span>
+                  </div>
+                  <p v-if="!summary.top_movers?.by_volume?.length" class="text-xs text-slate-500 text-center py-3">
+                    暂无数据
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
     <footer class="mt-6 text-center text-xs text-slate-600 font-mono">
-      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v2.2
+      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v2.3
     </footer>
 
     <!-- ====================== 交易备忘 hover tooltip（v1.1）====================== -->

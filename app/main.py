@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import API_DESCRIPTION, API_TITLE, API_VERSION
 from app.database import SessionLocal, init_db
 from app.models import Watchlist
-from app.routers import market_router, watchlist_router
+from app.routers import market_router, watchlist_router, strategy_router
 import market_fetcher as mf
 
 # 应用启动时统一配置 logging；屏蔽 akshare 进度条噪音
@@ -126,6 +126,7 @@ app = FastAPI(
 # 所以这里显式给两个 router 加 /api 前缀）
 app.include_router(watchlist_router, prefix="/api")
 app.include_router(market_router, prefix="/api")
+app.include_router(strategy_router, prefix="/api")
 
 
 # ====================== 健康检查 / 服务元信息 ======================
