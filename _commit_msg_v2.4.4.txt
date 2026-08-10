@@ -1,0 +1,20 @@
+fix(v2.4.4): axios 拦截器解包导致所有 r.data 拿到 undefined
+
+根因（用户截图发现的隐性 bug）：
+- api/index.js 响应拦截器 return resp.data（解包）
+- 但 Dashboard.vue 里所有调用都是 `const r = await xxx(); r.data`
+- 拦截器解包后 r 已经是 dict，r.data = undefined
+- 影响：AI 报告 content 空白 / 战报模态框可能不显示数据 / 异动雷达一直是空数组
+- 之前 v2.2 雷达一直空白就是这个原因（不是"网络问题"）
+
+修复：
+- 拦截器改回 (resp) => resp（保持 AxiosResponse 原始形态）
+- 之前所有的 r.data 调用点继续生效
+
+效果：
+- AI 报告 content 正确显示 Markdown 渲染
+- 战报模态框数据正确
+- 异动雷达不再空白（之前一直空）
+
+后端 + 存盘代码无变化（strategy.py 上一版 v2.4.3 已对）。
+只前端 API 一行 + build。

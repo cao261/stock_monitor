@@ -14,9 +14,11 @@ const api = axios.create({
   },
 })
 
-// 响应拦截器：把 axios 的 data 字段直接解出来，遇到非 2xx 抛出统一错误
+// 响应拦截器：v2.4.3 之前这里 return resp.data 把 data 解包了，导致 Dashboard 里所有
+// `const r = await xxx(); r.data` 都拿到 undefined（r 已经是 dict）。
+// 修法：保持 axios 默认行为（resp 是 AxiosResponse），让所有 r.data 继续生效。
 api.interceptors.response.use(
-  (resp) => resp.data,
+  (resp) => resp,
   (err) => {
     const status = err.response?.status
     const detail = err.response?.data?.detail || err.message
