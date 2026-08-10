@@ -1,0 +1,16 @@
+feat(v2.4.1): 切换默认 LLM 预设到 Agnes AI (agnes-2.5-flash)
+
+背景：
+- 用户日常使用 Agnes AI（apihub.agnes-ai.cn）的 agnes-2.5-flash 模型
+- 走 OpenAI Chat Completions 兼容协议，代码层零改动
+
+变更：
+- .env.example：把 agnes-2.5-flash 设为"在用预设"，其它 provider（OpenAI / DeepSeek / 通义 / 智谱 / 月之暗面）放注释里备用
+- .gitignore：增加 .env.* / *.env 兜底 + 显式 !.env.example 豁免
+- 真实 API Key 绝不入仓；用户在自己机器的 .env 填
+
+验证：
+- ripgrep 扫描：仓库无真实 key 痕迹，base_url 未硬编码到代码
+- .env.example 的 LLM_API_KEY= 是空值
+- .gitignore check-ignore .env / .env.local / .env.production 全部命中
+- .env.example 不被 ignore（会进仓）

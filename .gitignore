@@ -47,3 +47,6 @@ _commit_msg_*.txt
 
 # v2.4: 本地 LLM 配置（包含 API Key，绝不入仓）
 .env
+.env.*
+*.env
+!.env.example
