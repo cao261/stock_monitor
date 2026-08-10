@@ -1,0 +1,30 @@
+feat(v2.4.3): AI 报告召唤后弹独立全屏模态框 + 存盘到 data/ai_reports/
+
+背景：
+- v2.4.2 修过一次"自动滚到 AI 卡片"，但用户还是反馈"没看到"——
+  报告藏在战报模态框最底部，自选股卡片很长，85vh 视口看不到
+- 用户更想要"召唤完直接弹出"+"存到固定文件夹随时翻"
+
+变更：
+
+后端 app/routers/strategy.py：
+- 报告生成后自动存盘到 data/ai_reports/YYYY-MM-DD_HHMMSS.md
+- 文件头加元信息：模型名 + 召唤时间
+- 返回新增字段 file_path / file_name，前端能直接展示路径
+
+前端 frontend/src/components/Dashboard.vue：
+- 新增 aiReportModal 全屏独立模态框（z-[60] 高于战报 z-50）
+- 召唤成功后 aiReportModal=true 直接弹出，不在战报里藏
+- 模态框顶部条：📋 复制全文 + 🔁 重新召唤 + × 关闭
+- 模态框内容：📂 存盘路径横幅（绿色）+ Markdown 渲染区
+- 模态框底部：自选股数量 + 模型名
+- closeAiReport / copyAiReport 配套函数（clipboard API + 1.5s 反馈）
+
+升级要求：
+- 后端 strategy.py 改了 → 必须重启 uvicorn
+- 前端 dist build 后浏览器强刷（Ctrl+Shift+R）
+
+效果：
+- 点 ✨ → "AI 思考中…" → 5-15s 后独立模态框直接弹出
+- 模态框里能看到完整报告 + 存盘路径
+- 报告 Markdown 全文存到 data/ai_reports/，随时能翻历史

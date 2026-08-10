@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
@@ -193,10 +194,27 @@ async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
             detail=f"AI 复盘生成失败：{e}",
         ) from e
 
+    # 3. v2.4.3: 存盘到 data/ai_reports/YYYY-MM-DD_HHMMSS.md（按召唤时间）
+    #    用户想随时翻历史报告；命名按时间排序
+    now = datetime.now()
+    report_dir = Path(config.DATA_DIR) / "ai_reports"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_filename = now.strftime("%Y-%m-%d_%H%M%S") + ".md"
+    report_path = report_dir / report_filename
+    report_path.write_text(
+        f"# AI 深度复盘 · {now.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+        f"> 模型：{config.LLM_MODEL_NAME} · 召唤人：自用本地复盘工具\n\n"
+        f"---\n\n"
+        f"{report_md}\n",
+        encoding="utf-8",
+    )
+
     return {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "generated_at": now.isoformat(timespec="seconds"),
         "model": config.LLM_MODEL_NAME,
         "report_markdown": report_md,
+        "file_path": str(report_path),           # v2.4.3: 报告存盘路径
+        "file_name": report_filename,
         # 把战报数据也回传，前端如果想要"对照看"不用再调一次
         "summary": summary,
     }

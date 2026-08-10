@@ -67,9 +67,11 @@ const summary = ref(null)        // daily-summary 接口返回
 const showSummary = ref(false)   // 模态框可见
 const summaryLoading = ref(false)
 // v2.4: AI 深度复盘
-const aiReport = ref(null)       // { generated_at, model, report_markdown, summary }
+const aiReport = ref(null)       // { generated_at, model, report_markdown, summary, file_path, file_name }
 const aiLoading = ref(false)
-const aiError = ref('')          // 后端 503/502 时的提示信息
+const aiError = ref('')
+const aiReportModal = ref(false) // v2.4.3: 召唤成功后直接弹独立全屏模态框
+const aiCopied = ref(false)      // 复制按钮反馈
 // 每天 15:00 后第一次轮询自动弹通知；用日期 + 标记避免重复触发
 const summaryNotifiedDate = ref('')  // YYYY-MM-DD，已经触发过的日期
 const SUMMARY_AUTO_TRIGGER_HOUR = 15  // 15:00 收盘
@@ -593,18 +595,16 @@ function closeSummary() {
   showSummary.value = false
 }
 
-// v2.4.2: 召唤 AI 深度复盘
+// v2.4.3: 召唤 AI 深度复盘
 async function summonAiReport() {
   aiError.value = ''
-  aiReport.value = null
+  aiCopied.value = false
   aiLoading.value = true
   try {
     const r = await getAiReport()
     aiReport.value = r.data
-    // 等 DOM 更新后自动滚到 AI 卡片（之前藏在模态框最底部，用户看不到以为是没反应）
-    await nextTick()
-    const el = document.getElementById('ai-report-section')
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    // v2.4.3: 直接弹出独立的全屏 AI 报告模态框（不再藏在战报模态框底部）
+    aiReportModal.value = true
   } catch (e) {
     // 后端 503 / 502 / 网络错误 → 提示
     const status = e?.response?.status
@@ -618,6 +618,22 @@ async function summonAiReport() {
     }
   } finally {
     aiLoading.value = false
+  }
+}
+
+function closeAiReport() {
+  aiReportModal.value = false
+}
+
+async function copyAiReport() {
+  if (!aiReport.value?.report_markdown) return
+  try {
+    await navigator.clipboard.writeText(aiReport.value.report_markdown)
+    aiCopied.value = true
+    setTimeout(() => { aiCopied.value = false }, 1500)
+  } catch (e) {
+    // fallback: 选中 text 让用户手动 Ctrl+C
+    console.warn('clipboard 不可用:', e)
   }
 }
 
@@ -1669,6 +1685,98 @@ onUnmounted(() => {
     <footer class="mt-6 text-center text-xs text-slate-600 font-mono">
       5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v2.4
     </footer>
+
+    <!-- ====================== AI 复盘独立全屏模态框（v2.4.3）====================== -->
+    <Teleport to="body">
+      <div
+        v-if="aiReportModal"
+        class="fixed inset-0 z-[60] flex items-center justify-center p-4
+               bg-black/70 backdrop-blur-md"
+        @click.self="closeAiReport"
+      >
+        <div
+          class="relative bg-slate-900/95 backdrop-blur-md rounded-xl
+                 border border-slate-700/60 shadow-2xl
+                 w-full max-w-3xl max-h-[90vh] flex flex-col
+                 before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                 before:bg-gradient-to-br before:from-amber-500/40 before:via-purple-500/30 before:to-sky-500/40
+                 before:-z-10 before:pointer-events-none"
+        >
+          <!-- 顶部条 -->
+          <div class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur
+                      border-b border-slate-700/60 px-6 py-4
+                      flex items-center justify-between rounded-t-xl">
+            <div>
+              <div class="flex items-center gap-2">
+                <span class="text-xl">🤖</span>
+                <h3 class="text-lg font-semibold text-slate-100">AI 深度复盘</h3>
+                <span v-if="aiReport?.model" class="text-xs text-slate-500 font-mono">
+                  via {{ aiReport.model }}
+                </span>
+              </div>
+              <p v-if="aiReport?.generated_at" class="text-xs text-slate-500 font-mono mt-0.5">
+                {{ aiReport.generated_at }} · 已自动存盘
+              </p>
+            </div>
+            <div class="flex items-center gap-2">
+              <button
+                @click="copyAiReport"
+                class="px-3 py-1.5 text-xs font-medium rounded
+                       bg-slate-800/70 hover:bg-slate-700/70 border border-slate-600/60
+                       text-slate-200 transition"
+                :title="aiCopied ? '已复制 ✓' : '复制 Markdown 全文'"
+              >
+                {{ aiCopied ? '✓ 已复制' : '📋 复制全文' }}
+              </button>
+              <button
+                @click="summonAiReport"
+                class="px-3 py-1.5 text-xs font-medium rounded
+                       bg-gradient-to-r from-amber-500/20 via-purple-500/20 to-sky-500/20
+                       border border-amber-400/40 text-amber-200 hover:text-amber-100
+                       transition"
+                :disabled="aiLoading"
+                title="重新召唤（用最新数据）"
+              >
+                <span class="inline-block animate-pulse">🔁</span>
+                重新召唤
+              </button>
+              <button
+                @click="closeAiReport"
+                class="text-slate-500 hover:text-slate-200 text-2xl leading-none
+                       w-8 h-8 flex items-center justify-center rounded
+                       hover:bg-slate-800/60 transition"
+              >×</button>
+            </div>
+          </div>
+
+          <!-- 内容区：可滚动的 AI 报告 -->
+          <div class="flex-1 overflow-y-auto px-8 py-6">
+            <!-- 存盘路径横幅 -->
+            <div
+              v-if="aiReport?.file_path"
+              class="mb-4 px-3 py-2 rounded border border-emerald-500/30 bg-emerald-500/5
+                     text-emerald-200 text-xs font-mono flex items-center gap-2"
+            >
+              <span>📂</span>
+              <span class="text-emerald-300/80">报告已存：</span>
+              <span class="truncate">{{ aiReport.file_path }}</span>
+            </div>
+            <div
+              v-if="aiReport"
+              class="ai-report text-sm"
+              v-html="aiReportHtml"
+            ></div>
+          </div>
+
+          <!-- 底部 -->
+          <div class="border-t border-slate-700/60 px-6 py-3 text-xs text-slate-500 font-mono
+                      flex items-center justify-between rounded-b-xl">
+            <span>v2.4.3 · 基于 {{ aiReport?.summary?.watchlist_battle?.total || 0 }} 只自选股 + 全市场异动</span>
+            <span>模型：{{ aiReport?.model }}</span>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- ====================== 交易备忘 hover tooltip（v1.1）====================== -->
     <Teleport to="body">
