@@ -1,0 +1,16 @@
+fix(v2.4.2): 召唤 AI 报告后自动滚到 AI 卡片
+
+问题：
+- AI 报告在战报模态框的最底部（卡片 4：📊 → ⚔️ → 🚀 → 🤖）
+- 模态框 max-h-[85vh] overflow-y-auto，自选股战况卡片很长
+- 用户召唤 AI 后，看不到下方渲染的报告，以为"没反应"
+
+修复：
+- nextTick + scrollIntoView({behavior: 'smooth', block: 'start'})
+- 给 AI 卡片加 id="ai-report-section"
+- 召唤成功后（无论 AI 报告成功还是失败）都滚到 AI 卡片
+
+效果：
+- 按 ✨ → "AI 思考中…" 在原位
+- 5-15s 后报告出来 → 模态框自动平滑滚动到 AI 卡片
+- 用户绝对不会再"看不到"了

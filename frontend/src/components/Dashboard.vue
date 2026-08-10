@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import {
   addToWatchlist,
   getAiReport,
@@ -593,7 +593,7 @@ function closeSummary() {
   showSummary.value = false
 }
 
-// v2.4: 召唤 AI 深度复盘
+// v2.4.2: 召唤 AI 深度复盘
 async function summonAiReport() {
   aiError.value = ''
   aiReport.value = null
@@ -601,6 +601,10 @@ async function summonAiReport() {
   try {
     const r = await getAiReport()
     aiReport.value = r.data
+    // 等 DOM 更新后自动滚到 AI 卡片（之前藏在模态框最底部，用户看不到以为是没反应）
+    await nextTick()
+    const el = document.getElementById('ai-report-section')
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
   } catch (e) {
     // 后端 503 / 502 / 网络错误 → 提示
     const status = e?.response?.status
@@ -1594,6 +1598,7 @@ onUnmounted(() => {
 
             <!-- ====== 卡片 4: AI 深度复盘（v2.4）====== -->
             <div
+              id="ai-report-section"
               class="glass p-5 relative overflow-hidden
                      before:absolute before:inset-0 before:rounded-lg before:p-[1px]
                      before:bg-gradient-to-br before:from-amber-500/30 before:via-purple-500/25 before:to-sky-500/30
