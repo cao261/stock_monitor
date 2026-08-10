@@ -1,4 +1,4 @@
-# A-Stock Sentiment Monitor v2.3
+# A-Stock Sentiment Monitor v2.4
 
 A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
@@ -429,6 +429,64 @@ Build: ✓ 389.94 KB JS / 36.89 KB CSS
 - 旧 5 个接口（sentiment / top / fund-flow / watchlist / signals）全部 200
 
 Build: ✓ 401.57 KB JS / 41.52 KB CSS
+
+## AI 深度复盘（v2.4：LLM 接入）
+
+数据有了，故事也讲清楚了，但还差一个"专业基金经理视角"。v2.4 接入 LLM，
+把今日战报 JSON 喂给大模型，让它写一篇 ~400 字的深度复盘小作文。
+
+### 配置 LLM（OpenAI 兼容协议）
+
+```bash
+# 1. 复制配置模板
+cp .env.example .env
+
+# 2. 编辑 .env 填 key（任选一家）
+# OpenAI
+# LLM_API_KEY=sk-xxxxxxxx
+# LLM_BASE_URL=https://api.openai.com/v1
+# LLM_MODEL_NAME=gpt-4o-mini
+
+# DeepSeek（推荐，国内直连便宜）
+LLM_API_KEY=sk-你的-deepseek-key
+LLM_BASE_URL=https://api.deepseek.com/v1
+LLM_MODEL_NAME=deepseek-chat
+
+# 通义千问 / 智谱 / 月之暗面：改 BASE_URL + MODEL_NAME
+```
+
+支持任何 OpenAI 兼容协议的服务（DeepSeek / 通义千问 / 智谱 GLM / 月之暗面 / Ollama 等）。
+**没配 key 也不影响其他功能**，`/api/strategy/ai-report` 返 503 + 友好提示。
+
+### 后端
+
+- `app/services/llm.py`（新）：异步 LLM 客户端工厂 + 提示词模板
+- `app/routers/strategy.py`（新接口）：`POST /api/strategy/ai-report`
+  - 内部先调 `daily-summary` 拿战报 JSON
+  - 喂给 LLM（system: 顶 级 A 股量化基金经理，user: 数据 + 5 条要求）
+  - 返 `{ generated_at, model, report_markdown, summary }`
+- 优雅降级：
+  - 503：未配 key（前端展示配置步骤）
+  - 502：网络 / 限流 / 余额
+
+### 前端
+
+- 战报模态框顶部多了「✨ 召唤 AI 深度复盘」按钮（带 amber/purple/sky 渐变 + glow 特效）
+- 点击 → Loading「AI 正在深度思考今日盘面...」 → 报告渲染
+- 报告用自写的轻量级 Markdown 渲染器（# ## ** ` ` 1. - 等）→ v-html 展示
+  - 不用 marked + DOMPurify，build size 友好，XSS 也安全（白名单标签）
+- 报错时显示降级提示 + 可折叠的"配置步骤"说明
+
+### 验证
+
+无 key 测试：POST /ai-report → 503，body `{"detail":"LLM 未启用。请在项目根目录的 .env 里设置 LLM_API_KEY（参考 .env.example 切换 OpenAI / DeepSeek / 通义千问 / 智谱 等）。"}`
+
+有 key 时（用户自测）：
+- DeepSeek `deepseek-chat` 实测约 8~15 秒返回
+- OpenAI `gpt-4o-mini` 实测约 5~10 秒
+- 输出是 ~400 字 Markdown，覆盖大盘情绪 / 异动龙头 / 自选股战况 / 纪律评价
+
+Build: ✓ 407.23 KB JS / 48.07 KB CSS
 
 ## ETF support
 

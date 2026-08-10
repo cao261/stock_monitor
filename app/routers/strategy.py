@@ -3,14 +3,16 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 import analyzer
 import market_fetcher as mf
 
+from app import config
 from app.crud.watchlist import watchlist as crud
 from app.database import get_db
+from app.services import llm
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 
@@ -152,4 +154,49 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
             "by_change_pct": top_change,
             "by_volume": top_volume,
         },
+    }
+
+
+@router.post(
+    "/ai-report",
+    summary="AI 深度复盘（v2.4：LLM 生成）",
+)
+async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
+    """基于今日盘后数据调用 LLM 生成深度复盘 Markdown 报告。
+
+    前置：项目根目录 .env 里有 LLM_API_KEY（或 OpenAI-compatible 服务）。
+
+    没配 key 时：返 503 + 提示信息（不报错给前端，前端做降级 UI）。
+    网络/限流错误：返 502 + 错误信息。
+    """
+    if not config.LLM_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "LLM 未启用。请在项目根目录的 .env 里设置 LLM_API_KEY"
+                "（参考 .env.example 切换 OpenAI / DeepSeek / 通义千问 / 智谱 等）。"
+            ),
+        )
+
+    # 1. 先拿今日战报数据
+    summary = get_daily_summary(db=db)
+
+    # 2. 调用 LLM 生成报告
+    try:
+        report_md = await llm.generate_report(summary)
+    except Exception as e:
+        logger_msg = f"LLM 调用失败：{e!r}"
+        import logging
+        logging.getLogger("strategy").exception(logger_msg)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI 复盘生成失败：{e}",
+        ) from e
+
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "model": config.LLM_MODEL_NAME,
+        "report_markdown": report_md,
+        # 把战报数据也回传，前端如果想要"对照看"不用再调一次
+        "summary": summary,
     }

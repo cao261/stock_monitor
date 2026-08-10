@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   addToWatchlist,
+  getAiReport,
   getDailySummary,
   getFundFlow,
   getSentiment,
@@ -65,10 +66,112 @@ const RADAR_LIMIT = 20
 const summary = ref(null)        // daily-summary 接口返回
 const showSummary = ref(false)   // 模态框可见
 const summaryLoading = ref(false)
+// v2.4: AI 深度复盘
+const aiReport = ref(null)       // { generated_at, model, report_markdown, summary }
+const aiLoading = ref(false)
+const aiError = ref('')          // 后端 503/502 时的提示信息
 // 每天 15:00 后第一次轮询自动弹通知；用日期 + 标记避免重复触发
 const summaryNotifiedDate = ref('')  // YYYY-MM-DD，已经触发过的日期
 const SUMMARY_AUTO_TRIGGER_HOUR = 15  // 15:00 收盘
 const SUMMARY_CHECK_INTERVAL_MS = 60_000  // 1 分钟检查一次
+
+// ====================== v2.4: 轻量级 Markdown 渲染 ======================
+// 为什么要自己写而不是用 marked + DOMPurify？
+//   1. LLM 输出受控（system prompt 指定 Markdown + 中文），白名单标签足以
+//   2. 不引第三方依赖，build size 友好
+//   3. 样式自己说了算，跟毛玻璃风格统一
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+function renderInline(s) {
+  // 顺序：code > bold > italic > link（先吃最里层）
+  let out = escapeHtml(s)
+  // 行内 code
+  out = out.replace(/`([^`]+)`/g, '<code class="px-1 py-0.5 rounded bg-slate-950/60 border border-slate-700/50 text-amber-300 text-[0.85em] font-mono">$1</code>')
+  // bold
+  out = out.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-semibold text-slate-100">$1</strong>')
+  // italic（单 * 或 _）
+  out = out.replace(/(^|[^*])\*([^*\n]+)\*/g, '$1<em class="text-slate-300 italic">$2</em>')
+  return out
+}
+function renderMarkdown(md) {
+  if (!md) return ''
+  const lines = String(md).split('\n')
+  const out = []
+  let inOl = false
+  let inUl = false
+  let inCode = false
+  let codeBuf = []
+  const closeLists = () => {
+    if (inOl) { out.push('</ol>'); inOl = false }
+    if (inUl) { out.push('</ul>'); inUl = false }
+  }
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, '')
+    // 代码块 ``` ... ```
+    if (/^```/.test(line)) {
+      if (inCode) {
+        out.push(`<pre class="my-3 p-3 rounded bg-slate-950/70 border border-slate-700/40 overflow-x-auto text-[12px] font-mono text-slate-200"><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`)
+        codeBuf = []
+        inCode = false
+      } else {
+        closeLists()
+        inCode = true
+      }
+      continue
+    }
+    if (inCode) {
+      codeBuf.push(line)
+      continue
+    }
+    // 标题
+    let m
+    if ((m = /^(#{1,4})\s+(.*)$/.exec(line))) {
+      closeLists()
+      const level = m[1].length
+      const sizes = ['text-2xl', 'text-xl', 'text-lg', 'text-base']
+      out.push(`<h${level} class="${sizes[level - 1]} font-semibold text-slate-100 mt-4 mb-2">${renderInline(m[2])}</h${level}>`)
+      continue
+    }
+    // 引用 >
+    if ((m = /^>\s?(.*)$/.exec(line))) {
+      closeLists()
+      out.push(`<blockquote class="border-l-2 border-amber-500/60 pl-3 my-2 text-slate-300 italic">${renderInline(m[1])}</blockquote>`)
+      continue
+    }
+    // 有序列表
+    if ((m = /^\d+\.\s+(.*)$/.exec(line))) {
+      if (!inOl) { closeLists(); out.push('<ol class="list-decimal list-inside my-2 space-y-1 text-slate-200">'); inOl = true }
+      out.push(`<li>${renderInline(m[1])}</li>`)
+      continue
+    }
+    // 无序列表
+    if ((m = /^[-*]\s+(.*)$/.exec(line))) {
+      if (!inUl) { closeLists(); out.push('<ul class="list-disc list-inside my-2 space-y-1 text-slate-200">'); inUl = true }
+      out.push(`<li>${renderInline(m[1])}</li>`)
+      continue
+    }
+    // 空行 → 关闭列表
+    if (line.trim() === '') {
+      closeLists()
+      continue
+    }
+    // 普通段落
+    closeLists()
+    out.push(`<p class="my-2 leading-relaxed text-slate-200">${renderInline(line)}</p>`)
+  }
+  closeLists()
+  if (inCode) {
+    out.push(`<pre class="my-3 p-3 rounded bg-slate-950/70 border border-slate-700/40 overflow-x-auto text-[12px] font-mono text-slate-200"><code>${escapeHtml(codeBuf.join('\n'))}</code></pre>`)
+  }
+  return out.join('')
+}
+const aiReportHtml = computed(() => renderMarkdown(aiReport.value?.report_markdown || ''))
 
 // 行内编辑（v1.1）: 哪一行 + 哪个字段正在被编辑
 const editingCell = ref(null)  // { id, field } | null
@@ -488,6 +591,30 @@ async function openSummary() {
 }
 function closeSummary() {
   showSummary.value = false
+}
+
+// v2.4: 召唤 AI 深度复盘
+async function summonAiReport() {
+  aiError.value = ''
+  aiReport.value = null
+  aiLoading.value = true
+  try {
+    const r = await getAiReport()
+    aiReport.value = r.data
+  } catch (e) {
+    // 后端 503 / 502 / 网络错误 → 提示
+    const status = e?.response?.status
+    const detail = e?.response?.data?.detail
+    if (status === 503) {
+      aiError.value = '🔑 ' + (detail || '未配置 LLM_API_KEY，请到项目根目录的 .env 文件设置（参考 .env.example）。')
+    } else if (status === 502) {
+      aiError.value = '⚠️ ' + (detail || 'LLM 服务调用失败，请检查网络 / API key / 余额。')
+    } else {
+      aiError.value = '❌ ' + (detail || e.message || '未知错误')
+    }
+  } finally {
+    aiLoading.value = false
+  }
 }
 
 // 自动触发：每分钟检查一次，如果当前时间 ≥ 15:00 且今天还没触发过，
@@ -1215,12 +1342,32 @@ onUnmounted(() => {
                 生成于 {{ summary.generated_at }}
               </p>
             </div>
-            <button
-              @click="closeSummary"
-              class="text-slate-500 hover:text-slate-200 text-2xl leading-none
-                     w-8 h-8 flex items-center justify-center rounded
-                     hover:bg-slate-800/60 transition"
-            >×</button>
+            <div class="flex items-center gap-2">
+              <button
+                @click="summonAiReport"
+                :disabled="aiLoading"
+                class="px-3 py-1.5 text-xs font-medium rounded
+                       bg-gradient-to-r from-amber-500/20 via-purple-500/20 to-sky-500/20
+                       border border-amber-400/40
+                       text-amber-200 hover:text-amber-100
+                       hover:from-amber-500/30 hover:via-purple-500/30 hover:to-sky-500/30
+                       hover:border-amber-400/60
+                       transition shadow-[0_0_20px_rgba(245,158,11,0.15)]
+                       hover:shadow-[0_0_24px_rgba(245,158,11,0.3)]
+                       disabled:opacity-50 disabled:cursor-not-allowed
+                       flex items-center gap-1.5"
+                title="用大模型基于今日数据写一篇 AI 深度复盘小作文"
+              >
+                <span class="inline-block animate-pulse">✨</span>
+                <span>{{ aiLoading ? 'AI 思考中…' : '召唤 AI 深度复盘' }}</span>
+              </button>
+              <button
+                @click="closeSummary"
+                class="text-slate-500 hover:text-slate-200 text-2xl leading-none
+                       w-8 h-8 flex items-center justify-center rounded
+                       hover:bg-slate-800/60 transition"
+              >×</button>
+            </div>
           </div>
 
           <!-- 内容 -->
@@ -1444,13 +1591,78 @@ onUnmounted(() => {
                 </div>
               </div>
             </div>
+
+            <!-- ====== 卡片 4: AI 深度复盘（v2.4）====== -->
+            <div
+              class="glass p-5 relative overflow-hidden
+                     before:absolute before:inset-0 before:rounded-lg before:p-[1px]
+                     before:bg-gradient-to-br before:from-amber-500/30 before:via-purple-500/25 before:to-sky-500/30
+                     before:-z-10 before:pointer-events-none"
+            >
+              <div class="flex items-center justify-between mb-3">
+                <div class="flex items-center gap-2">
+                  <span class="text-base">✨</span>
+                  <h4 class="text-sm font-semibold text-slate-200 tracking-wide">
+                    AI 深度复盘
+                  </h4>
+                  <span v-if="aiReport?.model" class="text-xs text-slate-500 ml-2 font-mono">
+                    via {{ aiReport.model }}
+                  </span>
+                </div>
+                <span v-if="aiReport?.generated_at" class="text-xs text-slate-600 font-mono">
+                  {{ aiReport.generated_at }}
+                </span>
+              </div>
+
+              <!-- Loading -->
+              <div v-if="aiLoading" class="py-10 text-center">
+                <div class="inline-flex items-center gap-3 text-slate-400">
+                  <span class="text-2xl animate-pulse">✨</span>
+                  <span class="font-mono text-sm">AI 正在深度思考今日盘面...</span>
+                </div>
+              </div>
+
+              <!-- Error: 优雅降级（503 没配 key / 502 网络问题） -->
+              <div
+                v-else-if="aiError"
+                class="p-4 rounded border border-amber-500/30 bg-amber-500/5 text-amber-200 text-sm"
+              >
+                <p class="font-medium mb-1">⚠️ AI 复盘暂不可用</p>
+                <p class="text-xs text-amber-300/80 leading-relaxed">{{ aiError }}</p>
+                <details class="mt-2 text-xs text-amber-300/60">
+                  <summary class="cursor-pointer hover:text-amber-200 transition">配置步骤（点击展开）</summary>
+                  <ol class="mt-2 ml-4 list-decimal space-y-1 font-mono">
+                    <li>在项目根目录复制 <code class="text-amber-200">.env.example</code> 为 <code class="text-amber-200">.env</code></li>
+                    <li>填入你的 LLM_API_KEY（OpenAI / DeepSeek / 通义千问 都行）</li>
+                    <li>选好 LLM_BASE_URL 和 LLM_MODEL_NAME</li>
+                    <li>重启 <code class="text-amber-200">uvicorn</code> 即可</li>
+                  </ol>
+                </details>
+              </div>
+
+              <!-- Report: Markdown 渲染（自写轻量级 renderer） -->
+              <div
+                v-else-if="aiReport"
+                class="ai-report text-sm"
+                v-html="aiReportHtml"
+              ></div>
+
+              <!-- Empty state：还没召唤 -->
+              <div
+                v-else
+                class="py-6 text-center text-slate-500 text-sm"
+              >
+                <p class="mb-2">👆 点右上角「✨ 召唤 AI 深度复盘」</p>
+                <p class="text-xs text-slate-600">基于今日大盘 / 自选股 / 异动龙头数据，让大模型写一篇 ~400 字复盘小作文。</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </Teleport>
 
     <footer class="mt-6 text-center text-xs text-slate-600 font-mono">
-      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v2.3
+      5s 自动刷新 · 数据：新浪财经 / 腾讯财经 · 支持股票 + ETF · 持仓 / 止盈止损 v2.4
     </footer>
 
     <!-- ====================== 交易备忘 hover tooltip（v1.1）====================== -->

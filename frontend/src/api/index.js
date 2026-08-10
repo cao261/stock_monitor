@@ -145,4 +145,14 @@ export function getDailySummary() {
   return api.get('/strategy/daily-summary')
 }
 
+/**
+ * AI 深度复盘（v2.4：LLM 生成 Markdown）
+ * POST /strategy/ai-report
+ * 返回 { generated_at, model, report_markdown, summary }
+ * 注意：未配 LLM_API_KEY 时后端返 503，前端需要 catch 降级
+ */
+export function getAiReport() {
+  return api.post('/strategy/ai-report')
+}
+
 export default api

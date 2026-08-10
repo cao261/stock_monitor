@@ -1,0 +1,54 @@
+feat(v2.4): AI 深度复盘（LLM 接入 + ✨ 召唤 AI 按钮）
+
+数据底座已经有了：行情 / K线 / 持仓 / 止盈止损 / 异动雷达 / 复盘战报。
+v2.4 接入 LLM，让大模型基于今日 JSON 战报写一篇 ~400 字复盘小作文。
+
+后端：
+
+requirements.txt：
+- openai>=1.40（OpenAI 兼容协议客户端，覆盖 DeepSeek / 通义千问 / 智谱 / 月之暗面）
+- python-dotenv>=1.0
+
+app/config.py：
+- 读 .env 文件（python-dotenv）
+- LLM_API_KEY / LLM_BASE_URL / LLM_MODEL_NAME / LLM_TIMEOUT_SECONDS
+- LLM_ENABLED = bool(LLM_API_KEY) 派生属性
+- 没配 key 不报错（优雅降级）
+
+.env.example（已加 .gitignore）：
+- 给出 OpenAI / DeepSeek / 通义千问 / 智谱 4 家模板
+- 注释每个字段含义
+
+app/services/llm.py（新目录 + __init__.py）：
+- 异步 openai.AsyncOpenAI 客户端
+- Prompt 模板：system=顶级 A 股量化基金经理，user=数据 + 5 条要求
+- generate_report(summary) 异步函数
+
+app/routers/strategy.py：
+- 新增 POST /api/strategy/ai-report
+- 内部先调 daily-summary 拿战报 JSON
+- 喂 LLM，返 { generated_at, model, report_markdown, summary }
+- 503 优雅降级（无 key）/ 502（网络/限流）
+
+前端：
+
+api/index.js：getAiReport() 封装
+
+Dashboard.vue：
+- ✨ 召唤 AI 深度复盘 按钮（amber/purple/sky 渐变 + glow 阴影特效）
+- Loading 状态：AI 正在深度思考今日盘面...（✨ 动画）
+- 错误态：降级提示 + 可折叠"配置步骤"
+- 成功态：自写轻量级 Markdown 渲染器（# ## ** ` 1. - > 等）
+  - 不引第三方依赖，build size 友好
+  - 白名单标签 + escapeHtml 防 XSS
+  - v-html 输出，Tailwind 类名控制样式
+- 战报模态框 footer v2.3 → v2.4
+
+验证：
+- 无 key 时 POST /ai-report → 503 + 详细 .env 配置提示
+- 有 key（用户自测）：DeepSeek deepseek-chat 8-15s 出报告；gpt-4o-mini 5-10s
+- build 通过：407.23 KB JS / 48.07 KB CSS
+
+安全：
+- .env 加 .gitignore，key 永远不入仓
+- LLM 输出经 escapeHtml 后再用白名单标签转 v-html，XSS 风险低
