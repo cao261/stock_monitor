@@ -314,16 +314,17 @@ async function refresh() {
       getWatchlist(),
       getSignals(true),
     ])
-    sentiment.value = s
-    watchlist.value = w
+    sentiment.value = s.data
+    watchlist.value = w.data
 
-    const newCodes = new Set(sg.map((x) => x.ts_code))
-    const fresh = sg.filter((x) => !prevSignalCodes.has(x.ts_code))
+    const signalsList = sg.data || []
+    const newCodes = new Set(signalsList.map((x) => x.ts_code))
+    const fresh = signalsList.filter((x) => !prevSignalCodes.has(x.ts_code))
     if (prevSignalCodes.size > 0 && fresh.length > 0) {
       notifyNewSignals(fresh)
     }
     prevSignalCodes = newCodes
-    signals.value = sg
+    signals.value = signalsList
     lastUpdated.value = Date.now()
   } catch (e) {
     error.value = e.message
@@ -681,7 +682,7 @@ async function refreshFundFlow() {
   fundFlowLoading.value = true
   try {
     const r = await getFundFlow({ limit: 300 })
-    fundFlow.value = r
+    fundFlow.value = r.data
   } catch (e) {
     // 板块接口失败不打断主表（板块不在交易时段也可能没数据）
     console.warn('fund flow refresh failed:', e.message)
@@ -914,7 +915,7 @@ onUnmounted(() => {
             基准 {{ sentiment.swing_score }} · 打板 {{ sentiment.limit_premium }}
           </p>
           <p class="text-xs text-slate-500 mt-1 font-mono">
-            样本 {{ sentiment.total_stocks.toLocaleString() }} 只
+            样本 {{ sentiment.total_stocks?.toLocaleString?.() ?? '-' }} 只
           </p>
         </div>
         <div class="text-right">
@@ -937,12 +938,12 @@ onUnmounted(() => {
       <div class="glass p-5">
         <p class="text-slate-400 text-xs uppercase tracking-wider">上涨 / 下跌</p>
         <p class="text-3xl font-mono mt-3 leading-none">
-          <span :class="sentiment.up_count > sentiment.down_count ? 'glow-rose text-rose-400' : 'text-rose-400'">
-            {{ sentiment.up_count.toLocaleString() }}
+          <span :class="(sentiment.up_count ?? 0) > (sentiment.down_count ?? 0) ? 'glow-rose text-rose-400' : 'text-rose-400'">
+            {{ sentiment.up_count?.toLocaleString?.() ?? '-' }}
           </span>
           <span class="text-slate-600 mx-1.5">/</span>
-          <span :class="sentiment.down_count > sentiment.up_count ? 'glow-emerald text-emerald-400' : 'text-emerald-400'">
-            {{ sentiment.down_count.toLocaleString() }}
+          <span :class="(sentiment.down_count ?? 0) > (sentiment.up_count ?? 0) ? 'glow-emerald text-emerald-400' : 'text-emerald-400'">
+            {{ sentiment.down_count?.toLocaleString?.() ?? '-' }}
           </span>
         </p>
         <p class="text-xs text-slate-500 mt-3 font-mono">

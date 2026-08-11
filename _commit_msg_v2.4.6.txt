@@ -1,0 +1,25 @@
+fix(v2.4.6): Promise.all 解构裸赋值 + 模板无保护 toLocaleString 报错
+
+背景：
+- v2.4.5 修中文 minify bug 后，浏览器能加载 JS
+- 但 Vue render 时报：
+  TypeError: Cannot read properties of undefined (reading 'toLocaleString')
+  at Proxy.<anonymous> (refresh 路径)
+
+根因：
+- v2.4.4 改回 axios 拦截器不解包（return resp）
+- Dashboard.vue 里 Promise.all 解构后**裸赋值**：
+    const [s, w, sg] = await Promise.all([getSentiment(), getWatchlist(), getSignals(true)])
+    sentiment.value = s       // ❌ s 是 AxiosResponse，不是 dict
+    watchlist.value = w        // ❌ 同上
+    signals.value = sg         // ❌ 同上
+    fundFlow.value = r         // ❌ 同上（refreshFundFlow）
+- 模板里 3 处 .toLocaleString() 没加 optional chaining 保护，
+  sentiment.up_count / down_count / total_stocks 是 undefined 时直接爆
+
+修复：
+- 4 处 .value = xxx 改成 .value = xxx.data
+- 模板 3 处 .toLocaleString() 加 ?. 保护（fallback '-'）
+- sg.map 改用 signalsList (sg.data) 避免 AxiosResponse.map 报错
+
+加 ??.toLocaleString?.() 双层保护：字段 undefined 时不爆
