@@ -62,21 +62,27 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
             "position": position,
             "floating_pnl": pnl,
             "return_rate": ret,
+            # v2.5: 把交易备忘和止盈止损目标都带上，AI 监工需要逐只审查纪律
+            "trade_note": w.trade_note or "",
+            "target_win": w.target_win,
+            "target_loss": w.target_loss,
         }
         if signals.get("is_take_profit"):
-            take_profit_hits.append({**base, "target_win": signals.get("target_win")})
+            take_profit_hits.append({**base, "target_win": signals.get("target_win") or w.target_win})
         if signals.get("is_stop_loss"):
-            stop_loss_hits.append({**base, "target_loss": signals.get("target_loss")})
-        # 没持仓（cost 或 position 缺失）→ 单独一组
-        if cost is None or position is None:
+            stop_loss_hits.append({**base, "target_loss": signals.get("target_loss") or w.target_loss})
+        # v2.5: 三种状态分类（让 AI 监工能看见所有持仓的纪律）
+        #   1. 没持仓（cost/position 缺失）        → no_position
+        #   2. 有持仓但暂无价格（pnl 缺失）          → no_position（带 base）
+        #   3. 有持仓有价格（pnl 有值）                → pnl_winners / pnl_losers
+        if cost is None or position is None or pnl is None:
             no_position.append(base)
         else:
-            if pnl is not None:
-                pnl_total += pnl
-                if pnl > 0:
-                    pnl_winners.append(base)
-                elif pnl < 0:
-                    pnl_losers.append(base)
+            if pnl > 0:
+                pnl_winners.append(base)
+            elif pnl < 0:
+                pnl_losers.append(base)
+            pnl_total += pnl
             # 持仓市值（用于算总成本 / 总市值）
             if price and price > 0:
                 market_total += price * position
@@ -97,6 +103,8 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
         "stop_loss_triggered": stop_loss_hits,
         "winners": sorted(pnl_winners, key=lambda x: x.get("floating_pnl") or 0, reverse=True)[:5],
         "losers": sorted(pnl_losers, key=lambda x: x.get("floating_pnl") or 0)[:5],
+        # v2.5: 把 no_position 数组也带进响应（监工需要看持仓股的 trade_note / target_win / target_loss）
+        "no_position": no_position,
     }
 
     # ===== 3. 全市场异动龙头 =====

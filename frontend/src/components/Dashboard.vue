@@ -182,6 +182,47 @@ const editError = ref('')      // 行内编辑错误（如 -1 价格）
 // trade_note tooltip hover
 const noteTip = ref(null)      // { x, y, text } | null
 
+// v2.5: 4 个快捷交易模板（点击自动填入 newNote）
+// 设计原则：每个模板自带"可执行的纪律语句"，让 AI 监工有抓手可审查
+const TRADE_PRESETS = [
+  {
+    key: 'scalp',
+    label: '超短打板',
+    color: 'rose',   // 涨红
+    text: '博弈情绪溢价。核心纪律：次日不连板或跌破5日线，无条件清仓止损，绝不格局！',
+  },
+  {
+    key: 'swing',
+    label: '中线波段',
+    color: 'sky',    // 天蓝
+    text: '支撑位缩量低吸。逻辑：基本面反转。不放量跌破支撑线死拿，到前高压力位减半仓。',
+  },
+  {
+    key: 'grid',
+    label: '网格定投',
+    color: 'emerald', // 涨绿
+    text: '网格策略（底仓30%）。纪律：每下跌5%加仓1手，每反弹5%卖出1手。忽略短期波动，赚回归的钱。',
+  },
+  {
+    key: 'bottom',
+    label: '冰点潜伏',
+    color: 'amber',  // 琥珀
+    text: '缩量冰点潜伏，博弈题材二波预期。耐心等待资金回流，一旦触发『放量突破』视封单力度决定去留。',
+  },
+]
+// 颜色 → Tailwind class 映射（避免 Vue template 里堆三元表达式）
+const PRESET_COLOR_CLASSES = {
+  rose:     'border-rose-500/30 hover:border-rose-400/60 hover:bg-rose-500/15 text-rose-300 hover:text-rose-200',
+  sky:      'border-sky-500/30 hover:border-sky-400/60 hover:bg-sky-500/15 text-sky-300 hover:text-sky-200',
+  emerald:  'border-emerald-500/30 hover:border-emerald-400/60 hover:bg-emerald-500/15 text-emerald-300 hover:text-emerald-200',
+  amber:    'border-amber-500/30 hover:border-amber-400/60 hover:bg-amber-500/15 text-amber-300 hover:text-amber-200',
+}
+
+function applyPreset(text) {
+  // 直接覆盖（如果想"追加"改成 +=，但交易逻辑用覆盖更安全）
+  newNote.value = text
+}
+
 let prevSignalCodes = new Set()
 
 // ====================== 工具 ======================
@@ -887,6 +928,20 @@ onUnmounted(() => {
             <label class="block text-xs text-amber-400 mb-1.5 tracking-wider font-medium">
               📝 交易逻辑
             </label>
+            <!-- v2.5: 4 个快捷交易模板（一键填入交易纪律语句） -->
+            <div class="flex flex-wrap gap-1.5 mb-1.5">
+              <button
+                v-for="p in TRADE_PRESETS"
+                :key="p.key"
+                type="button"
+                @click="applyPreset(p.text)"
+                :class="['px-2 py-0.5 text-[11px] rounded-full border bg-slate-900/40 backdrop-blur-sm font-medium cursor-pointer transition',
+                         PRESET_COLOR_CLASSES[p.color]]"
+                :title="p.text"
+              >
+                {{ p.label }}
+              </button>
+            </div>
             <input
               v-model="newNote"
               type="text"
