@@ -398,6 +398,9 @@ function prefixToExchange(prefixed) {
 }
 
 async function onAdd() {
+  // v2.5.1: 每次点击先清旧错误，避免「请输入股票代码」这种本地校验错误残留
+  // 误导用户以为自己刚才是因为 409 失败
+  addError.value = ''
   const raw = newCode.value.trim()
   if (!raw) { addError.value = '请输入股票代码'; return }
   // 先归一化：6 位纯数字自动补前缀
@@ -824,8 +827,8 @@ onUnmounted(() => {
               type="text"
               placeholder="sh600000 / 600000 / 510300"
               class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                     text-slate-100 placeholder-slate-600 focus:outline-none
-                     focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                     text-slate-100 placeholder:text-slate-600 placeholder:italic placeholder:opacity-60
+                     focus:outline-none focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
                      font-mono text-sm transition"
             />
           </div>
@@ -838,8 +841,8 @@ onUnmounted(() => {
               type="text"
               placeholder="浦发银行"
               class="w-full px-3 py-2 bg-slate-950/50 border border-slate-700/60 rounded
-                     text-slate-100 placeholder-slate-600 focus:outline-none
-                     focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
+                     text-slate-100 placeholder:text-slate-600 placeholder:italic placeholder:opacity-60
+                     focus:outline-none focus:border-sky-500/70 focus:ring-1 focus:ring-sky-500/50
                      text-sm transition"
             />
           </div>
