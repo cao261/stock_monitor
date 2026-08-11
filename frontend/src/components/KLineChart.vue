@@ -130,8 +130,9 @@ async function loadAndRender() {
   loading.value = true
   errorMsg.value = ''
   try {
-    const data = await getStockHistory(props.tsCode)
-    render(data)
+    const r = await getStockHistory(props.tsCode)
+    // v2.4.7: axios 拦截器 return resp（不解包），所以 r.data 才是真正的 klines
+    render(r.data)
   } catch (e) {
     errorMsg.value = e.message
   } finally {

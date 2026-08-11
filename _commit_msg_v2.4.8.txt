@@ -1,0 +1,22 @@
+fix(v2.4.8): KLineChart.vue 漏改 .data — K 线显示"无历史数据"
+
+问题：
+- 用户截图：科创芯片ETF易方达 (sh589130) K 线模态框显示"无历史数据"
+- 后端 /api/market/sh589130/history 返回 60 根 K 线完全正常
+
+根因（v2.4.6 漏修）：
+- v2.4.4 改回 axios 拦截器 return resp（不解包）
+- v2.4.6 修了 Dashboard.vue 的 5 处 await getXxx 调用点
+- 但 KLineChart.vue 的 fetchHistory() 函数没改：
+    const data = await getStockHistory(props.tsCode)
+    render(data)   // ❌ data 是 AxiosResponse，data.klines = undefined
+- !data?.klines?.length 判定为 true → 显示"无历史数据"
+
+修复：
+- const r = await getStockHistory(props.tsCode)
+- render(r.data)  // v2.4.6 同样的模式
+- 之前 v2.2 时代 K 线一直是空的（v2.4.3 拦截器 return resp.data → r.data 拿到 undefined）
+  这次彻底修复
+
+教训：v2.4.6 改 Dashboard.vue 时应该全项目 grep 所有 await getXxx 一起改，
+而不是只看 Dashboard.vue。这次补了 KLineChart.vue
