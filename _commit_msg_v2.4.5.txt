@@ -1,0 +1,22 @@
+fix(v2.4.5): 禁用 minify 修复 rolldown 中文 UTF-8 编码 bug
+
+问题：
+- 用户浏览器"整页黑屏"（Chrome 显示小怪兽 = JS 错误）
+- 检查 dist bundle 发现：所有中文字符串都是 GBK 错位（"馃搨" "鎶ュ憡宸插瓨锛"）
+- minify 后 JS token 化时把后续语法也切碎，整个 bundle 无法 parse
+
+根因：
+- vite 8.2.0 + rolldown Rust bundler 在 Windows PowerShell 5.1 环境下
+- 处理 UTF-8 源文件里的中文字符串有 bug
+- 默认 minify 时把 UTF-8 字节当 GBK 编码输出
+
+修复：
+- package.json: build script 加 --minify=false
+- bundle 大小从 410KB → 750KB（gzip 188KB），生产可用
+- 中文 / emoji 完全正常（"召唤 AI 深度复盘" "📂" 都原文）
+
+后续：
+- 等 rolldown 修 bug 后可以恢复 minify
+- 或考虑换 oxc / terser minifier
+
+v2.4.4 的 axios 拦截器修复仍然有效（独立 commit）
