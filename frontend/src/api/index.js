@@ -8,7 +8,7 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: '/api',
-  timeout: 10000,
+  timeout: 60000,  // v2.4.6: 默认 60s（之前 10s 太短，AI 报告 LLM 冷启动 15-30s）
   headers: {
     'Content-Type': 'application/json',
   },
@@ -17,12 +17,13 @@ const api = axios.create({
 // 响应拦截器：v2.4.3 之前这里 return resp.data 把 data 解包了，导致 Dashboard 里所有
 // `const r = await xxx(); r.data` 都拿到 undefined（r 已经是 dict）。
 // 修法：保持 axios 默认行为（resp 是 AxiosResponse），让所有 r.data 继续生效。
+// 错误处理：timeout / network error 没有 response，要 fallback 到 err.message
 api.interceptors.response.use(
   (resp) => resp,
   (err) => {
     const status = err.response?.status
-    const detail = err.response?.data?.detail || err.message
-    return Promise.reject(new Error(`[${status}] ${detail}`))
+    const detail = err.response?.data?.detail || err.message || '未知错误'
+    return Promise.reject(new Error(`[${status ?? 'NETWORK'}] ${detail}`))
   },
 )
 

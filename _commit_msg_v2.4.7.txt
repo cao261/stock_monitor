@@ -1,0 +1,20 @@
+fix(v2.4.7): axios timeout 10s → 60s + 错误信息 [undefined] 修复
+
+问题：
+- 用户截图：战报模态框完全正常（涨幅榜 +662% 等都显示），v2.4.6 修复成功
+- 但点"召唤 AI 深度复盘"按钮报：
+    ❌ [undefined] timeout of 10000ms exceeded
+- AI 报告 5-15s 跑完，axios 默认 10s 超时先 throw
+
+根因：
+- api/index.js axios.create timeout: 10000
+- LLM 第一次冷启动调用 agnes 2.5-flash 经常 15-30s
+- 超时后 axios throw，但 err.response 是 undefined
+- 拦截器用 err.response?.data?.detail || err.message → err.message 是 'timeout of 10000ms exceeded'，但 status 拿不到变 undefined
+- 所以显示 [undefined] timeout...
+
+修复：
+- timeout 10000 → 60000（60s 足够 LLM 调用）
+- 拦截器 status ?? 'NETWORK' fallback（status 拿不到时显示 NETWORK 而非 undefined）
+
+后端 strategy.py 已经有 LLM_TIMEOUT_SECONDS=45，前端 60s 留余量。
