@@ -121,6 +121,22 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
+# v2.5.2: 全局 middleware — 强制给所有 application/json response 加 charset=utf-8
+# 修复 watchlist 名称 / trade_note 等中文字段显示成 "????" 的 bug
+# 根因：FastAPI 默认 content-type 是 "application/json"（无 charset），浏览器/Vue axios
+# 拿到后按 Latin-1 解析，UTF-8 多字节序列被错误解码成 "?"。
+# 修法：response 头里没有 charset 时，自动追加 "; charset=utf-8"
+@app.middleware("http")
+async def add_charset_to_json_response(request, call_next):
+    response = await call_next(request)
+    ct = response.headers.get("content-type", "")
+    # 只处理 JSON 类，没 charset 的才补
+    if ct.startswith("application/json") and "charset=" not in ct.lower():
+        response.headers["content-type"] = "application/json; charset=utf-8"
+    return response
+
+
 # API 路由（先注册，匹配优先级高于下面的 catch-all）
 # 前端走 /api/* 路径（之前是 vite 代理 rewrite 掉 /api，集成后由 FastAPI 直 serve
 # 所以这里显式给两个 router 加 /api 前缀）
