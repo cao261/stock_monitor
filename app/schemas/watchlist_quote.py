@@ -43,4 +43,25 @@ class WatchlistQuote(BaseModel):
     floating_pnl: float | None = Field(None, description="浮动盈亏（元）")
     return_rate: float | None = Field(None, description="收益率（%）")
 
+    # ===== v2.6: trade_note 智能解析结果 =====
+    # 用户没设 target_* 但 trade_note 写了"跌破 1620"这种带数字的策略时，
+    # 后端自动从 note 里挖出价位作为兜底。signals 扫描会拿 eff_target_* 当价格线。
+    note_extracted_target_win: float | None = Field(
+        None, description="从 trade_note 文本里自动识别的止盈价（用户未设时兜底用）"
+    )
+    note_extracted_target_loss: float | None = Field(
+        None, description="从 trade_note 文本里自动识别的止损价（用户未设时兜底用）"
+    )
+    eff_target_win: float | None = Field(
+        None, description="实际生效的止盈价（用户值优先，note 提取值兜底）"
+    )
+    eff_target_loss: float | None = Field(
+        None, description="实际生效的止损价（用户值优先，note 提取值兜底）"
+    )
+    note_has_rule: bool = Field(False, description="trade_note 里是否有任何纪律（数字或语义）")
+    note_semantic_rules: list[str] = Field(
+        default_factory=list,
+        description="trade_note 里命中的纯语义规则关键词（'网格策略'/'次日不连板' 等）",
+    )
+
     model_config = ConfigDict(from_attributes=True)

@@ -14,6 +14,7 @@ from app import config
 from app.crud.watchlist import watchlist as crud
 from app.database import get_db
 from app.services import llm
+from app.utils.trade_note_parser import parse_trade_note
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 
@@ -42,10 +43,17 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
     cost_total = 0.0
     market_total = 0.0
     for w in items:
+        # v2.6: 用 trade_note 智能解析 — 用户没设 target_* 时，从 trade_note 里挖
+        note_parsed = parse_trade_note(w.trade_note)
+        eff_target_win = w.target_win if w.target_win is not None else note_parsed["target_win"]
+        eff_target_loss = w.target_loss if w.target_loss is not None else note_parsed["target_loss"]
+        # 把 trade_note 解析结果也带进 base，前端能显示"🤖 已识别"
         sig = analyzer.check_signals(
             w.ts_code,
             mf.get_stock(w.ts_code) or {},
             mf.get_history(w.ts_code),
+            target_win=eff_target_win,
+            target_loss=eff_target_loss,
         ) or {}
         signals = sig.get("signals", {}) or {}
         current = sig.get("current", {}) or {}
@@ -66,6 +74,19 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
             "trade_note": w.trade_note or "",
             "target_win": w.target_win,
             "target_loss": w.target_loss,
+            # v2.6: trade_note 智能解析结果
+            #   - note_extracted_target_win / note_extracted_target_loss: 从笔记里挖出的价
+            #   - eff_target_win / eff_target_loss: 实际生效的止盈/止损（用户值优先，笔记值兜底）
+            #   - note_has_rule: True 表示笔记里有任何纪律（数字或语义）
+            "note_extracted_target_win": note_parsed["target_win"],
+            "note_extracted_target_loss": note_parsed["target_loss"],
+            "eff_target_win": eff_target_win,
+            "eff_target_loss": eff_target_loss,
+            "note_has_rule": bool(
+                note_parsed["target_win"] or note_parsed["target_loss"]
+                or note_parsed["semantic_rules"]
+            ),
+            "note_semantic_rules": note_parsed["semantic_rules"],
         }
         if signals.get("is_take_profit"):
             take_profit_hits.append({**base, "target_win": signals.get("target_win") or w.target_win})

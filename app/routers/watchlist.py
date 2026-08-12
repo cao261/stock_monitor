@@ -109,6 +109,15 @@ async def list_watchlist_quotes(
                 if float(item.cost_price) > 0:
                     return_rate = round(diff / float(item.cost_price) * 100.0, 2)
 
+        # ===== v2.6: trade_note 智能解析 =====
+        from app.utils.trade_note_parser import parse_trade_note
+        note_parsed = parse_trade_note(item.trade_note)
+        eff_target_win = item.target_win if item.target_win is not None else note_parsed["target_win"]
+        eff_target_loss = item.target_loss if item.target_loss is not None else note_parsed["target_loss"]
+        note_has_rule = bool(
+            note_parsed["target_win"] or note_parsed["target_loss"] or note_parsed["semantic_rules"]
+        )
+
         if quote is None:
             result.append(
                 WatchlistQuote(
@@ -126,6 +135,13 @@ async def list_watchlist_quotes(
                     target_loss=item.target_loss,
                     floating_pnl=None,
                     return_rate=None,
+                    # v2.6
+                    note_extracted_target_win=note_parsed["target_win"],
+                    note_extracted_target_loss=note_parsed["target_loss"],
+                    eff_target_win=eff_target_win,
+                    eff_target_loss=eff_target_loss,
+                    note_has_rule=note_has_rule,
+                    note_semantic_rules=note_parsed["semantic_rules"],
                 )
             )
             continue
@@ -157,6 +173,13 @@ async def list_watchlist_quotes(
                 target_loss=item.target_loss,
                 floating_pnl=floating_pnl,
                 return_rate=return_rate,
+                # v2.6
+                note_extracted_target_win=note_parsed["target_win"],
+                note_extracted_target_loss=note_parsed["target_loss"],
+                eff_target_win=eff_target_win,
+                eff_target_loss=eff_target_loss,
+                note_has_rule=note_has_rule,
+                note_semantic_rules=note_parsed["semantic_rules"],
             )
         )
     return result
@@ -195,13 +218,18 @@ def list_watchlist_signals(
                 })
             continue
         history = mf.get_history(item.ts_code)
+        # v2.6: 用 eff_target_* (用户值优先，trade_note 提取值兜底) 触发信号
+        from app.utils.trade_note_parser import parse_trade_note
+        _note = parse_trade_note(item.trade_note)
+        _eff_tw = item.target_win if item.target_win is not None else _note["target_win"]
+        _eff_tl = item.target_loss if item.target_loss is not None else _note["target_loss"]
         # v1.2: 把止盈/止损价也传进信号引擎，触发对应 is_take_profit / is_stop_loss
         sig = analyzer.check_signals(
             item.ts_code,
             current,
             history,
-            target_win=item.target_win,
-            target_loss=item.target_loss,
+            target_win=_eff_tw,
+            target_loss=_eff_tl,
         )
         triggered = (
             sig["signals"]["is_volume_breakout"]

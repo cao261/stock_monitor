@@ -95,11 +95,14 @@ def _normalize_code(code: str) -> str:
         body = raw.zfill(6)
         prefix = None
     if prefix is None:
-        if body.startswith(("60", "68", "11", "13", "5")):
+        # 沪市 sh：主板 60/68/90、ETF 5xxxxx、LOF/债券 11/13
+        if body.startswith(("60", "68", "90", "5", "11", "13")):
             prefix = "sh"
-        elif body.startswith(("00", "30", "12", "15")):
+        # 深市 sz：主板 00/20/30、ETF 15/16/18、债券 10/12
+        elif body.startswith(("00", "20", "30", "15", "16", "18", "10", "12")):
             prefix = "sz"
-        elif body.startswith(("8", "43", "92")):
+        # 北交所 bj：43/83/87/88/92 开头（**只**这几种 8 开头是北交所，**不是所有 8 开头**）
+        elif body.startswith(("43", "83", "87", "88", "92")):
             prefix = "bj"
         else:
             prefix = "sh"  # 兜底，避免落空

@@ -817,6 +817,23 @@ onUnmounted(() => {
     <!-- ====================== 添加表单（v1.2: 高级选项折叠）===================== -->
     <section class="glass p-5 mb-6">
       <form @submit.prevent="onAdd" class="space-y-3">
+        <!-- v2.6: addError 移到这里（form 顶部），用户一进表单就看到 -->
+        <!-- 加边框 + 背景 + 关闭按钮，醒目不遗漏 -->
+        <div
+          v-if="addError"
+          class="flex items-start gap-2 px-3 py-2 rounded
+                 border border-rose-500/50 bg-rose-950/30
+                 text-rose-300 text-sm font-mono animate-pulse"
+        >
+          <span class="text-rose-400 mt-0.5">⚠️</span>
+          <span class="flex-1 break-all">{{ addError }}</span>
+          <button
+            type="button"
+            @click="addError = ''"
+            class="text-rose-400 hover:text-rose-200 text-base leading-none px-1"
+            title="关闭"
+          >×</button>
+        </div>
         <div class="flex flex-wrap items-end gap-3">
           <div class="flex-1 min-w-[140px]">
             <label class="block text-xs text-slate-400 mb-1.5 tracking-wider">
@@ -956,10 +973,6 @@ onUnmounted(() => {
             />
           </div>
         </div>
-
-        <p v-if="addError" class="text-rose-400 text-xs font-mono">
-          {{ addError }}
-        </p>
       </form>
     </section>
 
@@ -1278,11 +1291,37 @@ onUnmounted(() => {
                     class="text-slate-700 text-xs flex-shrink-0 mt-0.5"
                   >—</span>
                   <div class="flex flex-col gap-0.5 text-xs font-mono leading-tight">
-                    <span v-if="w.target_win != null" class="text-emerald-400/80">
+                    <!-- v2.6: 用户显式设的 target 优先显示（最亮） -->
+                    <span v-if="w.target_win != null" class="text-emerald-400">
                       止盈 {{ fmtPrice(w.target_win) }}
                     </span>
-                    <span v-if="w.target_loss != null" class="text-rose-400/80">
+                    <span v-if="w.target_loss != null" class="text-rose-400">
                       止损 {{ fmtPrice(w.target_loss) }}
+                    </span>
+                    <!-- v2.6: trade_note 智能识别 — 用户没设但 note 提到了数字，自动识别为价 -->
+                    <span
+                      v-if="w.target_win == null && w.note_extracted_target_win != null"
+                      class="text-emerald-400/60 italic"
+                      :title="`从交易笔记自动识别：止盈 ${fmtPrice(w.note_extracted_target_win)}`"
+                    >
+                      止盈 {{ fmtPrice(w.note_extracted_target_win) }} <span class="text-[9px] not-italic">🤖</span>
+                    </span>
+                    <span
+                      v-if="w.target_loss == null && w.note_extracted_target_loss != null"
+                      class="text-rose-400/60 italic"
+                      :title="`从交易笔记自动识别：止损 ${fmtPrice(w.note_extracted_target_loss)}`"
+                    >
+                      止损 {{ fmtPrice(w.note_extracted_target_loss) }} <span class="text-[9px] not-italic">🤖</span>
+                    </span>
+                    <!-- v2.6: 纯语义规则标记（"网格策略"/"次日不连板" 等无数字规则） -->
+                    <span
+                      v-if="!w.target_win && !w.target_loss
+                            && !w.note_extracted_target_win && !w.note_extracted_target_loss
+                            && w.note_semantic_rules && w.note_semantic_rules.length"
+                      class="text-slate-400 italic text-[10px]"
+                      :title="`语义规则：${w.note_semantic_rules.join('、')}`"
+                    >
+                      📋 {{ w.note_semantic_rules.slice(0, 2).join('·') }}{{ w.note_semantic_rules.length > 2 ? '…' : '' }}
                     </span>
                   </div>
                 </div>
