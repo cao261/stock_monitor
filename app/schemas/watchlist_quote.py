@@ -63,5 +63,16 @@ class WatchlistQuote(BaseModel):
         default_factory=list,
         description="trade_note 里命中的纯语义规则关键词（'网格策略'/'次日不连板' 等）",
     )
+    # ===== v2.6.2: 自动判字段（让前端不用手算）=====
+    # note_target_broken: 当前价 <= eff_target_loss（trade_note 里的止损位已被破）
+    # note_target_reached: 当前价 >= eff_target_win（trade_note 里的止盈位已到）
+    # 这俩跟 is_stop_loss / is_take_profit 不同 —— 这俩只看 eff_target_* 跟当前价的关系
+    # 不依赖 is_take_profit 信号是否触发。给用户 / LLM 一个"硬性命中"的判断。
+    note_target_broken: bool = Field(
+        False, description="当前价 ≤ eff_target_loss：trade_note 里的止损位已破"
+    )
+    note_target_reached: bool = Field(
+        False, description="当前价 ≥ eff_target_win：trade_note 里的止盈位已到"
+    )
 
     model_config = ConfigDict(from_attributes=True)

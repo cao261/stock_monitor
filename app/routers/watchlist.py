@@ -117,6 +117,14 @@ async def list_watchlist_quotes(
         note_has_rule = bool(
             note_parsed["target_win"] or note_parsed["target_loss"] or note_parsed["semantic_rules"]
         )
+        # v2.6.2: 自动判字段 —— 让前端不用手算"是否已破止损 / 已到止盈"
+        cur_price = quote.get("price") if quote else None
+        note_target_broken = bool(
+            cur_price and eff_target_loss and cur_price <= eff_target_loss
+        )
+        note_target_reached = bool(
+            cur_price and eff_target_win and cur_price >= eff_target_win
+        )
 
         if quote is None:
             result.append(
@@ -142,6 +150,9 @@ async def list_watchlist_quotes(
                     eff_target_loss=eff_target_loss,
                     note_has_rule=note_has_rule,
                     note_semantic_rules=note_parsed["semantic_rules"],
+                    # v2.6.2: cache miss 时取不到现价，所以这两个字段为 False
+                    note_target_broken=False,
+                    note_target_reached=False,
                 )
             )
             continue
@@ -180,6 +191,9 @@ async def list_watchlist_quotes(
                 eff_target_loss=eff_target_loss,
                 note_has_rule=note_has_rule,
                 note_semantic_rules=note_parsed["semantic_rules"],
+                # v2.6.2
+                note_target_broken=note_target_broken,
+                note_target_reached=note_target_reached,
             )
         )
     return result

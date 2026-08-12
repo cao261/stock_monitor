@@ -62,6 +62,13 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
         position = w.position
         pnl = sig.get("floating_pnl")
         ret = sig.get("return_rate")
+        # v2.6.2: 让 LLM 不用手算 —— 自动判断"trade_note 里的止损是否被破 / 止盈是否到"
+        note_target_broken = False
+        note_target_reached = False
+        if price and eff_target_loss and price <= eff_target_loss:
+            note_target_broken = True
+        if price and eff_target_win and price >= eff_target_win:
+            note_target_reached = True
         base = {
             "ts_code": w.ts_code,
             "name": w.name or sig.get("name") or "",
@@ -87,6 +94,13 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
                 or note_parsed["semantic_rules"]
             ),
             "note_semantic_rules": note_parsed["semantic_rules"],
+            # v2.6.2: 自动判字段
+            #   - note_target_broken: 当前价 <= eff_target_loss (按 trade_note 提取的止损价已破)
+            #   - note_target_reached: 当前价 >= eff_target_win (按 trade_note 提取的止盈价已到)
+            # 跟 is_stop_loss / is_take_profit 不同点：这俩**只看 eff_target**，不管 is_take_profit 触发
+            # 用来给 LLM 简化判断：即便用户没显式设 target_*, 但笔记里写了，也照样盯盘
+            "note_target_broken": note_target_broken,
+            "note_target_reached": note_target_reached,
         }
         if signals.get("is_take_profit"):
             take_profit_hits.append({**base, "target_win": signals.get("target_win") or w.target_win})

@@ -225,6 +225,56 @@ function applyPreset(text) {
 
 let prevSignalCodes = new Set()
 
+// v2.6.2: 桌面通知去重 —— 每个 (ts_code, signal_kind, trade_date) 每天只弹一次
+// 用 localStorage 持久化（按日期切分，过期自动失效）
+const NOTIFY_DEDUPE_PREFIX = 'signal_notified_'
+function wasNotified(tsCode, kind, tradeDate) {
+  try {
+    return !!localStorage.getItem(NOTIFY_DEDUPE_PREFIX + tsCode + '_' + kind + '_' + tradeDate)
+  } catch (_) { return false }
+}
+function markNotified(tsCode, kind, tradeDate) {
+  try {
+    localStorage.setItem(NOTIFY_DEDUPE_PREFIX + tsCode + '_' + kind + '_' + tradeDate, '1')
+  } catch (_) {}
+}
+// v2.6.2: 信号 → 中文描述映射（给桌面通知用，让用户一眼看懂"为什么触发"）
+const SIGNAL_LABELS = {
+  is_volume_breakout:     '放量突破',
+  is_shrinking_pullback:  '缩量回踩',
+  is_take_profit:         '触发止盈',
+  is_stop_loss:           '触发止损',
+}
+
+function notifySignal(stock, sig) {
+  if (!canNotify()) return
+  const tradeDate = sig.trade_date || new Date().toISOString().slice(0, 10)
+  const name = stock.name || sig.name || stock.ts_code
+  // 哪个信号触发了
+  const triggered = []
+  for (const [k, label] of Object.entries(SIGNAL_LABELS)) {
+    if (sig.signals?.[k]) {
+      // 通知去重：每个 (股票, 信号, 交易日) 每天一次
+      if (wasNotified(stock.ts_code, k, tradeDate)) continue
+      markNotified(stock.ts_code, k, tradeDate)
+      triggered.push(label)
+    }
+  }
+  if (triggered.length === 0) return
+  const body = `${name} ${sig.current?.price ?? '-'} 元 · ${triggered.join(' + ')}`
+  try {
+    const n = new Notification('🔔 盯盘信号', {
+      body,
+      tag: 'watchlist-signal-' + stock.ts_code,
+      requireInteraction: true,
+    })
+    n.onclick = () => {
+      window.focus()
+      n.close()
+    }
+  } catch (e) { /* ignore */ }
+}
+
 // ====================== 工具 ======================
 function fmtPct(v) {
   if (v == null || Number.isNaN(v)) return '-'
@@ -397,68 +447,88 @@ function prefixToExchange(prefixed) {
   return null
 }
 
+// v2.6.2 修复关键 bug：v-model 绑 type=number 时 value 是 number 不是 string，
+// 调 .trim() 直接 TypeError，onAdd 中断 + addError 都没机会设 → 用户以为「点了没反应」
+// 兜底函数：任何值都安全转 string 再 trim
+function sval(v) {
+  if (v == null) return ''
+  return String(v).trim()
+}
+function sfloat(v) {
+  // 安全 parseFloat：空串/空格 → null；非数字 → null
+  const s = sval(v)
+  if (s === '') return null
+  const n = parseFloat(s)
+  return Number.isNaN(n) ? null : n
+}
+function sint(v) {
+  // 安全 parseInt：空串/空格 → null；非整数 → null
+  const s = sval(v)
+  if (s === '') return null
+  // 只允许纯数字（避免 "1.5" "1e3" "-1" 等被接受）
+  if (!/^\d+$/.test(s)) return null
+  const n = parseInt(s, 10)
+  return Number.isNaN(n) ? null : n
+}
+
 async function onAdd() {
   // v2.5.1: 每次点击先清旧错误，避免「请输入股票代码」这种本地校验错误残留
-  // 误导用户以为自己刚才是因为 409 失败
-  addError.value = ''
-  const raw = newCode.value.trim()
-  if (!raw) { addError.value = '请输入股票代码'; return }
-  // 先归一化：6 位纯数字自动补前缀
-  const code = normalizeTsCode(raw)
-  if (!/^(sh|sz|bj)\d{6}$/.test(code)) {
-    addError.value = '代码格式错误（示例：sh600000 / 600000 / sh510300）'
-    return
-  }
-  // 校验可选持仓字段
-  let cost = null, position = null
-  const costRaw = newCost.value.trim()
-  if (costRaw !== '') {
-    cost = parseFloat(costRaw)
-    if (Number.isNaN(cost) || cost < 0) { addError.value = '成本价必须是 ≥ 0 的数字'; return }
-  }
-  const posRaw = newPosition.value.trim()
-  if (posRaw !== '') {
-    position = parseInt(posRaw, 10)
-    if (Number.isNaN(position) || position < 0 || String(position) !== posRaw) {
-      addError.value = '持仓股数必须是 ≥ 0 的整数'
-      return
-    }
-  }
-  // 注意：用户可能只填了成本没填股数（或反之）—— 不允许半残，让后端不要算
-  // 简化策略：两个都必填，或都为空。要么两个都填，要么两个都空。
-  if ((cost != null && position == null) || (cost == null && position != null)) {
-    addError.value = '成本价和持仓股数要一起填（或都留空）'
-    return
-  }
-  // v1.2: 解析止盈 / 止损
-  let targetWin = null, targetLoss = null
-  const twRaw = newTargetWin.value.trim()
-  if (twRaw !== '') {
-    targetWin = parseFloat(twRaw)
-    if (Number.isNaN(targetWin) || targetWin <= 0) { addError.value = '止盈价必须是 > 0 的数字'; return }
-  }
-  const tlRaw = newTargetLoss.value.trim()
-  if (tlRaw !== '') {
-    targetLoss = parseFloat(tlRaw)
-    if (Number.isNaN(targetLoss) || targetLoss <= 0) { addError.value = '止损价必须是 > 0 的数字'; return }
-  }
-  // 如果两个都填，止盈必须 > 止损
-  if (targetWin != null && targetLoss != null && targetWin <= targetLoss) {
-    addError.value = '止盈价必须高于止损价'
-    return
-  }
-  const note = newNote.value.trim() || null
-
-  // exchange 字段：从归一化后的 ts_code 前缀推断
-  // 兜底逻辑：用户可以不传 exchange，后端允许 null；但我们顺手补上，前端体验更稳
-  const exchange = prefixToExchange(code)
-
-  adding.value = true
+  // v2.6.2: 整个 onAdd 套外层 try-catch —— 万一中途任意 throw，至少 addError 看得见
   addError.value = ''
   try {
+    const raw = sval(newCode.value)
+    if (!raw) { addError.value = '请输入股票代码'; return }
+    // 先归一化：6 位纯数字自动补前缀
+    const code = normalizeTsCode(raw)
+    if (!/^(sh|sz|bj)\d{6}$/.test(code)) {
+      addError.value = '代码格式错误（示例：sh600000 / 600000 / sh510300）'
+      return
+    }
+    // 校验可选持仓字段（v2.6.2 改用 sval/sfloat/sint 兜底任何类型）
+    let cost = null, position = null
+    const costRaw = sval(newCost.value)
+    if (costRaw !== '') {
+      cost = sfloat(newCost.value)
+      if (cost == null || cost < 0) { addError.value = '成本价必须是 ≥ 0 的数字'; return }
+    }
+    const posRaw = sval(newPosition.value)
+    if (posRaw !== '') {
+      position = sint(newPosition.value)
+      if (position == null) { addError.value = '持仓股数必须是 ≥ 0 的整数'; return }
+    }
+    // 注意：用户可能只填了成本没填股数（或反之）—— 不允许半残，让后端不要算
+    // 简化策略：两个都必填，或都为空。要么两个都填，要么两个都空。
+    if ((cost != null && position == null) || (cost == null && position != null)) {
+      addError.value = '成本价和持仓股数要一起填（或都留空）'
+      return
+    }
+    // v1.2: 解析止盈 / 止损
+    let targetWin = null, targetLoss = null
+    const twRaw = sval(newTargetWin.value)
+    if (twRaw !== '') {
+      targetWin = sfloat(newTargetWin.value)
+      if (targetWin == null || targetWin <= 0) { addError.value = '止盈价必须是 > 0 的数字'; return }
+    }
+    const tlRaw = sval(newTargetLoss.value)
+    if (tlRaw !== '') {
+      targetLoss = sfloat(newTargetLoss.value)
+      if (targetLoss == null || targetLoss <= 0) { addError.value = '止损价必须是 > 0 的数字'; return }
+    }
+    // 如果两个都填，止盈必须 > 止损
+    if (targetWin != null && targetLoss != null && targetWin <= targetLoss) {
+      addError.value = '止盈价必须高于止损价'
+      return
+    }
+    const note = sval(newNote.value) || null
+
+    // exchange 字段：从归一化后的 ts_code 前缀推断
+    const exchange = prefixToExchange(code)
+
+    adding.value = true
+    addError.value = ''
     await addToWatchlist({
       ts_code: code,
-      name: newName.value.trim() || undefined,
+      name: sval(newName.value) || undefined,
       exchange,
       cost_price: cost,
       position: position,
@@ -477,9 +547,19 @@ async function onAdd() {
     showAdvanced.value = false
     await refresh()
   } catch (e) {
-    addError.value = e.message
+    // v2.6.2: 兜底 catch —— 任何意外 throw 都给用户看到 addError，不再"点了没反应"
+    console.error('[onAdd] unexpected error:', e)
+    addError.value = `添加失败：${e?.message || e}`
   } finally {
     adding.value = false
+    // v2.6.2: addError 显示后，滚到 form 顶部（form 在页面顶端，不需要滚动，但确保用户看到）
+    // 防御：万一用户在长列表里点 +，addError 出现但被遮住，window.scrollTo 兜底
+    if (addError.value) {
+      try {
+        // 表单在顶部，正常无需滚动；这里 force scroll 是兜底
+        window.scrollTo({ top: 0, behavior: 'smooth' })
+      } catch (_) {}
+    }
   }
 }
 
@@ -577,40 +657,61 @@ function onKeyDown(e) {
 function canNotify() {
   return typeof Notification !== 'undefined' && Notification.permission === 'granted'
 }
+// v2.6.2: 真正的"盯盘"通知
+//   之前的逻辑：只对"新出现"的 fresh 股票弹一次 → 如果刷新之前没出现，刷新后即使
+//   信号已经触发也不会弹（漏报）。且没去重，每次轮询都重弹。
+//   新逻辑：
+//     1. 对所有触发了至少一个信号的股票，都尝试弹通知
+//     2. 每天每个 (ts_code, signal_kind) 只弹一次（localStorage 持久化）
+//     3. 优先级：止损 > 止盈 > 量价异动
+//     4. trade_note 里若指定了止盈止损价（用户没显式填但笔记里写了），也走这个通知
+//     5. 优先用 trade_message（analyzer 拼好的双行文案），更精准
 function notifyNewSignals(fresh) {
   if (!canNotify()) return
+  // 用 trade_date 当去重 key（每个交易日只对同 (股票, 信号) 弹一次）
+  const today = new Date().toISOString().slice(0, 10)
   for (const s of fresh) {
     const sigs = s.signals || {}
-    // 优先级：止盈/止损 > 量价异动
-    if (sigs.is_take_profit) {
-      try {
-        new Notification('🎯 止盈信号', {
-          body: `${s.ts_code} ${s.name || ''} 到达止盈线 ${fmtPrice(sigs.target_win)} · 现价 ${fmtPrice(s.current.close)} · 注意减仓`,
-          tag: `signal-${s.ts_code}-take-profit`,
-        })
-      } catch (_) { /* ignore */ }
-      continue
-    }
+    const name = s.name || s.ts_code
+    const price = s.current?.price ?? s.current?.close
+    // 优先级：止损（必须手动关）> 止盈 > 量价异动
     if (sigs.is_stop_loss) {
+      if (wasNotified(s.ts_code, 'is_stop_loss', today)) continue
+      markNotified(s.ts_code, 'is_stop_loss', today)
+      const body = s.trade_message
+        ? `${name} · ${s.trade_message} · 现价 ${fmtPrice(price)}`
+        : `${name} 触及止损 · 现价 ${fmtPrice(price)} · 建议减仓 / 离场`
       try {
-        new Notification('🛡️ 止损信号', {
-          body: `${s.ts_code} ${s.name || ''} 触及止损线 ${fmtPrice(sigs.target_loss)} · 现价 ${fmtPrice(s.current.close)} · 建议减仓 / 离场`,
-          tag: `signal-${s.ts_code}-stop-loss`,
-          requireInteraction: true,  // 止损必须手动关，不自动消失
-        })
-      } catch (_) { /* ignore */ }
+        new Notification('🛡️ 止损信号', { body, tag: 'signal-stop-loss-' + s.ts_code, requireInteraction: true })
+      } catch (_) {}
       continue
     }
-    // 量价异动
+    if (sigs.is_take_profit) {
+      if (wasNotified(s.ts_code, 'is_take_profit', today)) continue
+      markNotified(s.ts_code, 'is_take_profit', today)
+      const body = s.trade_message
+        ? `${name} · ${s.trade_message} · 现价 ${fmtPrice(price)}`
+        : `${name} 到达止盈 · 现价 ${fmtPrice(price)} · 注意减仓`
+      try {
+        new Notification('🎯 止盈信号', { body, tag: 'signal-take-profit-' + s.ts_code })
+      } catch (_) {}
+      continue
+    }
+    // 量价异动（每天每只股票只弹一次）
     const kind = sigs.is_volume_breakout
-      ? '放量突破'
-      : sigs.is_shrinking_pullback ? '缩量企稳' : '异动'
-    try {
-      new Notification('量价异动', {
-        body: `${s.ts_code} ${s.name || ''} 触发 ${kind}（量比 ${s.volume_ratio}，涨幅 ${fmtPct(s.current.change_pct)}）`,
-        tag: `signal-${s.ts_code}-${kind}`,
-      })
-    } catch (_) { /* ignore */ }
+      ? 'is_volume_breakout'
+      : sigs.is_shrinking_pullback ? 'is_shrinking_pullback' : null
+    if (kind) {
+      if (wasNotified(s.ts_code, kind, today)) continue
+      markNotified(s.ts_code, kind, today)
+      const label = kind === 'is_volume_breakout' ? '放量突破' : '缩量企稳'
+      try {
+        new Notification('量价异动', {
+          body: `${name} 触发 ${label} · 量比 ${s.volume_ratio ?? '?'} · 涨幅 ${fmtPct(s.current?.change_pct)} · 现价 ${fmtPrice(price)}`,
+          tag: 'signal-' + kind + '-' + s.ts_code,
+        })
+      } catch (_) {}
+    }
   }
 }
 async function requestNotifyPermission() {
@@ -1291,11 +1392,22 @@ onUnmounted(() => {
                     class="text-slate-700 text-xs flex-shrink-0 mt-0.5"
                   >—</span>
                   <div class="flex flex-col gap-0.5 text-xs font-mono leading-tight">
+                    <!-- v2.6.2: "已破止损"/"已到止盈" 角标（强提醒，比单纯显示数字更醒目） -->
+                    <span
+                      v-if="w.note_target_broken"
+                      class="text-rose-300 font-bold animate-pulse"
+                      :title="`当前价 ${fmtPrice(w.price)} ≤ 止损 ${fmtPrice(w.eff_target_loss)} —— 交易笔记纪律已被触发`"
+                    >⚠️ 已破止损 {{ fmtPrice(w.eff_target_loss) }}</span>
+                    <span
+                      v-if="w.note_target_reached"
+                      class="text-emerald-300 font-bold animate-pulse"
+                      :title="`当前价 ${fmtPrice(w.price)} ≥ 止盈 ${fmtPrice(w.eff_target_win)} —— 交易笔记纪律已到目标`"
+                    >🎯 已到止盈 {{ fmtPrice(w.eff_target_win) }}</span>
                     <!-- v2.6: 用户显式设的 target 优先显示（最亮） -->
-                    <span v-if="w.target_win != null" class="text-emerald-400">
+                    <span v-if="w.target_win != null && !w.note_target_reached" class="text-emerald-400">
                       止盈 {{ fmtPrice(w.target_win) }}
                     </span>
-                    <span v-if="w.target_loss != null" class="text-rose-400">
+                    <span v-if="w.target_loss != null && !w.note_target_broken" class="text-rose-400">
                       止损 {{ fmtPrice(w.target_loss) }}
                     </span>
                     <!-- v2.6: trade_note 智能识别 — 用户没设但 note 提到了数字，自动识别为价 -->
