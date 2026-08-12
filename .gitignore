@@ -32,6 +32,24 @@ _test_prune.mjs.bak
 _verify*.py
 *.bak
 
+# v2.6.2: 本会话临时调试脚本（自动化 / 后端验证 / 数据库探针 / 日志）
+_check_*.py
+_test_*.py
+_test_*.js
+_dbg_*.py
+_find_*.py
+_list.py
+_update_memory.py
+_ai_report_*.txt
+_ai_report_*.md
+_uvicorn_*.log
+_uvicorn.log
+_uvicorn_err.log
+_uvicorn_out.log
+_vite_*.log
+_build_dbg.log
+_daily_summary.json
+
 # ====================== IDE / OS ======================
 .vscode/
 .idea/
