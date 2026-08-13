@@ -182,32 +182,33 @@ const editError = ref('')      // 行内编辑错误（如 -1 价格）
 // trade_note tooltip hover
 const noteTip = ref(null)      // { x, y, text } | null
 
-// v2.5: 4 个快捷交易模板（点击自动填入 newNote）
-// 设计原则：每个模板自带"可执行的纪律语句"，让 AI 监工有抓手可审查
+// v2.8: 4 个快捷交易模板（点击自动填入 newNote）
+// 设计原则：每个模板自带"可执行的纪律语句" + 自然语言留接口给 NLP 提取
+// 真实交易者视角：每条都强调"动作意图 + 退出条件"，不是空泛口号
 const TRADE_PRESETS = [
   {
     key: 'scalp',
-    label: '超短打板',
+    label: '超短接力',
     color: 'rose',   // 涨红
-    text: '博弈情绪溢价。核心纪律：次日不连板或跌破5日线，无条件清仓止损，绝不格局！',
+    text: '[超短] 龙头博弈。纪律：跌破5日线或亏损达5%无条件止损。不破5日线死拿。',
   },
   {
     key: 'swing',
-    label: '中线波段',
+    label: '中线右侧',
     color: 'sky',    // 天蓝
-    text: '支撑位缩量低吸。逻辑：基本面反转。不放量跌破支撑线死拿，到前高压力位减半仓。',
+    text: '[中线] 趋势跟随。纪律：20日均线处缩量低吸。放量跌破20日线止损，前高压力位止盈半仓。',
   },
   {
     key: 'grid',
-    label: '网格定投',
+    label: '小本金无限网格',
     color: 'emerald', // 涨绿
-    text: '网格策略（底仓30%）。纪律：每下跌5%加仓1手，每反弹5%卖出1手。忽略短期波动，赚回归的钱。',
+    text: '[网格] 震荡套利。纪律：以 last_grid_price 为基准，每跌 5% 加仓 1 手，每涨 5% 卖出 1 手。利用时间换空间。',
   },
   {
     key: 'bottom',
-    label: '冰点潜伏',
+    label: '左侧金字塔定投',
     color: 'amber',  // 琥珀
-    text: '缩量冰点潜伏，博弈题材二波预期。耐心等待资金回流，一旦触发『放量突破』视封单力度决定去留。',
+    text: '[长线] 金字塔建仓（底仓20%）。纪律：无需止损，每跌幅达 8%、15%、25% 分别加仓 1x, 2x, 4x。利用大跌摊薄成本。',
   },
 ]
 // 颜色 → Tailwind class 映射（避免 Vue template 里堆三元表达式）
@@ -304,6 +305,18 @@ function buildStrategyAdvice(w) {
       return { level: 'ok', icon: '✅', text: '浮盈中，坚守纪律' }
     }
     if (ret < 0) {
+      // v2.8: 左侧金字塔定投策略——浮亏 = 加仓机会，不是"盯止损"！
+      // 用"左侧定投"/"金字塔"/"左侧加仓" 关键词识别（NLP 提取的 note_semantic_rules）
+      if (w.note_semantic_rules && w.note_semantic_rules.some(r =>
+        r === '金字塔' || r === '左侧金字塔' || r === '左侧定投' || r === '左侧加仓'
+      )) {
+        return {
+          level: 'grid-buy',
+          icon: '📉',
+          text: `浮亏中，已进入金字塔左侧加仓区（${ret.toFixed(1)}%），请结合支撑位操作`,
+          title: '左侧定投策略：浮亏越多越应按金字塔比例加仓摊薄成本，不应被"盯止损"劝离',
+        }
+      }
       return { level: 'warn', icon: '🟡', text: '浮亏中，盯住止损位' }
     }
   }
@@ -660,24 +673,105 @@ async function commitEdit(id, field) {
   }
 }
 
-// v2.7 一键同步：把当前价设成新的网格基准价
-// 场景：用户刚在券商完成了一笔网格加/减仓交易，点一下把基准价更新到最新成交价
-async function syncGridPrice(w) {
-  if (w.price == null) return
+// v2.8 补仓/减仓记账计算器
+// 场景：用户刚在券商完成一笔成交（加仓 or 减仓），弹 Dialog 让用户输入
+//       成交价 + 成交数量，前端实时算加权平均成本 + 新基准价，确认后 PATCH 一次更新
+// 核心算法（加权平均）：
+//   new_position = w.position + tradeQty
+//   if tradeQty > 0 (加仓): new_cost = (old_cost * old_pos + trade_price * trade_qty) / new_position
+//   if tradeQty < 0 (减仓): new_cost = old_cost  （减仓不动成本）
+//   last_grid_price = tradePrice  （无论加减仓，新基准就是这次成交价）
+const adjustDialog = ref({
+  open: false,
+  w: null,             // 整行 watchlist 引用（包含旧 cost/position/grid_ref/price）
+  tradePrice: '',      // 字符串，避免 v-model type=number 的 sval 坑
+  tradeQty: '',
+  error: '',
+  submitting: false,
+})
+
+// 实时算加权平均预览（不依赖 Dialog open 状态）
+const adjustPreview = computed(() => {
+  const d = adjustDialog.value
+  if (!d.w) return null
+  const oldCost = d.w.cost_price
+  const oldPos = d.w.position
+  const tp = parseFloat(d.tradePrice)
+  const tq = parseInt(d.tradeQty, 10)
+  if (isNaN(tp) || tp <= 0) return { error: '请输入有效的成交价' }
+  if (isNaN(tq) || tq === 0) return { error: '请输入成交数量（正数加仓，负数减仓）' }
+  if (oldPos == null || oldPos < 0) {
+    // 没有原持仓 → 必须用加仓（tq > 0）来初始化
+    if (tq <= 0) return { error: '还没有持仓，请输入正数（加仓）' }
+    return {
+      tradeType: 'init',
+      newPosition: tq,
+      newCost: tp,           // 第一次建仓，成本 = 成交价
+      newGridRef: tp,
+      change: tq,
+      oldCost: null,
+    }
+  }
+  if (oldCost == null) {
+    return { error: '原持仓缺少成本价，请先在表格里录入成本价' }
+  }
+  const newPos = oldPos + tq
+  if (newPos <= 0) {
+    return { error: '减仓后剩余持仓 ≤ 0，请重新输入（清仓请直接删自选股）' }
+  }
+  const tradeType = tq > 0 ? 'add' : 'reduce'
+  // 加仓：加权平均；减仓：成本不变（卖出旧持仓不影响剩余持仓的成本）
+  const newCost = tradeType === 'add'
+    ? (oldCost * oldPos + tp * tq) / newPos
+    : oldCost
+  return {
+    tradeType,
+    newPosition: newPos,
+    newCost: newCost,
+    newGridRef: tp,
+    change: tq,
+    oldCost: oldCost,
+    oldPos: oldPos,
+  }
+})
+
+function openAdjustDialog(w) {
+  adjustDialog.value = {
+    open: true,
+    w: w,
+    tradePrice: w.price != null ? String(w.price) : '',
+    tradeQty: '',
+    error: '',
+    submitting: false,
+  }
+}
+function closeAdjustDialog() {
+  adjustDialog.value.open = false
+  adjustDialog.value.error = ''
+}
+async function confirmAdjustDialog() {
+  const d = adjustDialog.value
+  const preview = adjustPreview.value
+  if (!preview || preview.error) {
+    d.error = preview?.error || '请检查输入'
+    return
+  }
+  d.submitting = true
+  d.error = ''
   try {
-    await updateWatchlist(w.id, { last_grid_price: Number(w.price) })
-    // 给个一闪而过的视觉反馈（绿色闪烁），让用户知道生效了
-    const orig = w.last_grid_price
-    w.last_grid_price = Number(w.price)  // 乐观更新
-    editingCell.value = null
+    // 一次 PATCH 同步更新 3 个字段：成本 + 持仓 + 网格基准
+    // 注意：v2.7 起的 last_grid_price 也属于同一个 PATCH body
+    await updateWatchlist(d.w.id, {
+      cost_price: Number(preview.newCost.toFixed(4)),
+      position: preview.newPosition,
+      last_grid_price: preview.newGridRef,
+    })
     await refresh()
-    // 1.2s 后小提示
-    setTimeout(() => {
-      // 不弹窗，只在错误区显示一条小提示
-      // 不需要显式清理，因为 next refresh 会重置
-    }, 1200)
+    closeAdjustDialog()
   } catch (e) {
-    editError.value = `同步基准价失败：${e?.message || e}`
+    d.error = `保存失败：${e?.message || e}`
+  } finally {
+    d.submitting = false
   }
 }
 
@@ -1336,11 +1430,11 @@ onUnmounted(() => {
                     >
                       {{ w.last_grid_price != null ? fmtPrice(w.last_grid_price) : '基准' }}
                     </span>
-                    <!-- 🔄 一键同步：把当前价设为新基准（用户在券商完成网格交易后一键重置） -->
+                    <!-- v2.8 🔄 补仓/减仓记账按钮：弹 Dialog 让用户填成交价 + 数量 -->
                     <button
                       v-if="w.in_cache && w.price != null"
-                      @click="syncGridPrice(w)"
-                      :title="`把基准价重置为当前价 ${fmtPrice(w.price)}`"
+                      @click="openAdjustDialog(w)"
+                      :title="`补仓/减仓记账：把当前价 ${fmtPrice(w.price)} 预填到成交价`"
                       class="text-fuchsia-400 hover:text-fuchsia-200 hover:scale-110
                              transition flex-shrink-0 px-0.5 -mr-0.5"
                     >🔄</button>
@@ -2118,6 +2212,153 @@ onUnmounted(() => {
             :target-win="chartTargetWin"
             :target-loss="chartTargetLoss"
           />
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ====================== v2.8 补仓/减仓记账计算器 Dialog ====================== -->
+    <Teleport to="body">
+      <div
+        v-if="adjustDialog.open"
+        class="fixed inset-0 z-[70] flex items-center justify-center p-4
+               bg-black/70 backdrop-blur-md"
+        @click.self="closeAdjustDialog"
+        @keyup.escape="closeAdjustDialog"
+      >
+        <div
+          class="relative bg-slate-900/95 backdrop-blur-md rounded-xl
+                 border border-fuchsia-500/40 shadow-2xl
+                 w-full max-w-md
+                 before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                 before:bg-gradient-to-br before:from-fuchsia-500/40 before:via-purple-500/30 before:to-sky-500/40
+                 before:-z-10 before:pointer-events-none"
+        >
+          <!-- 顶部条 -->
+          <div class="px-5 py-4 border-b border-slate-700/60 flex items-center justify-between">
+            <div>
+              <h3 class="text-base font-semibold text-slate-100 flex items-center gap-2">
+                <span class="text-lg">🔄</span>
+                补仓 / 减仓记账
+              </h3>
+              <p v-if="adjustDialog.w" class="text-xs text-slate-500 mt-0.5 font-mono">
+                {{ adjustDialog.w.ts_code }} · {{ adjustDialog.w.name || adjustDialog.w.name_from_market }}
+              </p>
+            </div>
+            <button
+              @click="closeAdjustDialog"
+              class="text-slate-500 hover:text-slate-200 text-2xl leading-none
+                     w-8 h-8 flex items-center justify-center rounded
+                     hover:bg-slate-800/60 transition"
+            >×</button>
+          </div>
+
+          <!-- 内容区 -->
+          <div class="px-5 py-4 space-y-3">
+            <!-- 旧值展示 -->
+            <div v-if="adjustDialog.w" class="grid grid-cols-2 gap-2 text-xs font-mono">
+              <div class="bg-slate-800/40 rounded px-3 py-2">
+                <div class="text-slate-500 mb-0.5">原成本价</div>
+                <div class="text-slate-200">{{ adjustDialog.w.cost_price != null ? fmtPrice(adjustDialog.w.cost_price) : '（未填）' }}</div>
+              </div>
+              <div class="bg-slate-800/40 rounded px-3 py-2">
+                <div class="text-slate-500 mb-0.5">原持仓</div>
+                <div class="text-slate-200">{{ adjustDialog.w.position != null ? adjustDialog.w.position.toLocaleString('zh-CN') + ' 股' : '（未填）' }}</div>
+              </div>
+              <div class="bg-slate-800/40 rounded px-3 py-2">
+                <div class="text-slate-500 mb-0.5">原基准价</div>
+                <div class="text-fuchsia-300">{{ adjustDialog.w.last_grid_price != null ? fmtPrice(adjustDialog.w.last_grid_price) : (adjustDialog.w.cost_price != null ? fmtPrice(adjustDialog.w.cost_price) + ' (回退)' : '（未填）') }}</div>
+              </div>
+              <div class="bg-slate-800/40 rounded px-3 py-2">
+                <div class="text-slate-500 mb-0.5">当前现价</div>
+                <div :class="adjustDialog.w.change_pct >= 0 ? 'text-rose-300' : 'text-emerald-300'">
+                  {{ fmtPrice(adjustDialog.w.price) }}
+                  <span class="text-[10px] ml-1">
+                    ({{ adjustDialog.w.change_pct >= 0 ? '+' : '' }}{{ adjustDialog.w.change_pct?.toFixed(2) }}%)
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <!-- 输入框 -->
+            <div class="space-y-2 pt-1">
+              <label class="block">
+                <span class="text-xs text-slate-400 mb-1 block">本次成交价（元）</span>
+                <input
+                  v-focus
+                  v-model="adjustDialog.tradePrice"
+                  type="number" step="0.001" min="0"
+                  placeholder="默认填入当前现价"
+                  class="w-full px-3 py-2 bg-slate-950/70 border border-fuchsia-500/40 rounded
+                         text-slate-100 font-mono text-sm
+                         focus:outline-none focus:border-fuchsia-400 focus:ring-1 focus:ring-fuchsia-500/50"
+                />
+              </label>
+              <label class="block">
+                <span class="text-xs text-slate-400 mb-1 block">
+                  本次成交数量（股）
+                  <span class="text-slate-500">正数加仓 / 负数减仓 / 0 忽略</span>
+                </span>
+                <input
+                  v-model="adjustDialog.tradeQty"
+                  type="number" step="100" placeholder="100 / 1000 / -500"
+                  class="w-full px-3 py-2 bg-slate-950/70 border border-fuchsia-500/40 rounded
+                         text-slate-100 font-mono text-sm
+                         focus:outline-none focus:border-fuchsia-400 focus:ring-1 focus:ring-fuchsia-500/50"
+                />
+              </label>
+            </div>
+
+            <!-- 实时预览 -->
+            <div v-if="adjustPreview" class="rounded-lg border border-fuchsia-500/30 bg-fuchsia-500/5 px-3 py-2.5">
+              <div class="text-[11px] text-fuchsia-300 mb-1.5 font-medium tracking-wider">📊 预览（确认后写入）</div>
+              <div v-if="adjustPreview.error" class="text-rose-300 text-sm">{{ adjustPreview.error }}</div>
+              <div v-else class="grid grid-cols-3 gap-2 text-xs font-mono">
+                <div>
+                  <div class="text-slate-500 text-[10px]">新成本价</div>
+                  <div class="text-fuchsia-200 font-semibold">{{ fmtPrice(adjustPreview.newCost) }}</div>
+                  <div v-if="adjustPreview.tradeType === 'add' && adjustPreview.oldCost != null" class="text-[10px] text-slate-500">
+                    {{ adjustPreview.newCost > adjustPreview.oldCost ? '↑' : '↓' }} 加权摊{{ adjustPreview.newCost < adjustPreview.oldCost ? '薄' : '高' }}
+                  </div>
+                </div>
+                <div>
+                  <div class="text-slate-500 text-[10px]">新持仓</div>
+                  <div class="text-fuchsia-200 font-semibold">{{ adjustPreview.newPosition.toLocaleString('zh-CN') }} 股</div>
+                  <div v-if="adjustPreview.change" class="text-[10px]" :class="adjustPreview.change > 0 ? 'text-fuchsia-400' : 'text-amber-400'">
+                    {{ adjustPreview.change > 0 ? '+' : '' }}{{ adjustPreview.change.toLocaleString('zh-CN') }}
+                  </div>
+                </div>
+                <div>
+                  <div class="text-slate-500 text-[10px]">新基准价</div>
+                  <div class="text-fuchsia-200 font-semibold">{{ fmtPrice(adjustPreview.newGridRef) }}</div>
+                  <div class="text-[10px] text-slate-500">本次成交价</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- 错误条 -->
+            <div v-if="adjustDialog.error" class="text-rose-300 text-xs bg-rose-500/10 border border-rose-500/30 rounded px-3 py-2">
+              {{ adjustDialog.error }}
+            </div>
+          </div>
+
+          <!-- 底部按钮 -->
+          <div class="px-5 py-3 border-t border-slate-700/60 flex items-center justify-end gap-2">
+            <button
+              @click="closeAdjustDialog"
+              class="px-4 py-1.5 text-sm text-slate-300 hover:text-slate-100
+                     bg-slate-800/60 hover:bg-slate-700/60 rounded transition"
+            >取消</button>
+            <button
+              @click="confirmAdjustDialog"
+              :disabled="adjustDialog.submitting || (adjustPreview && adjustPreview.error)"
+              :class="['px-4 py-1.5 text-sm rounded font-medium transition',
+                       adjustDialog.submitting || (adjustPreview && adjustPreview.error)
+                         ? 'bg-fuchsia-500/30 text-fuchsia-200/50 cursor-not-allowed'
+                         : 'bg-fuchsia-500/80 hover:bg-fuchsia-500 text-white shadow-lg shadow-fuchsia-500/20']"
+            >
+              {{ adjustDialog.submitting ? '保存中…' : '确认记账' }}
+            </button>
+          </div>
         </div>
       </div>
     </Teleport>

@@ -82,6 +82,12 @@ _SEMANTIC_RULES = [
     r"(?<![无非同])定投",
     r"冰点",
     r"潜伏",
+    # v2.8: 左侧金字塔定投策略（多档位加仓，固定止损不适合）
+    r"(?<![无非同])金字塔",
+    r"左侧金字塔",
+    r"左侧定投",
+    r"左侧加仓",
+    r"右侧趋势",  # 中线右侧模板里也加，方便 buildStrategyAdvice 区分
 ]
 _SEMANTIC_RE = re.compile("|".join(_SEMANTIC_RULES))
 
