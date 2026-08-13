@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
   addToWatchlist,
   getAiReport,
@@ -184,7 +184,11 @@ const aiReportHtml = computed(() => renderMarkdown(aiReport.value?.report_markdo
 
 // 行内编辑（v1.1）: 哪一行 + 哪个字段正在被编辑
 const editingCell = ref(null)  // { id, field } | null
-const editValues = ref({})     // { [`${id}-${field}`]: string }
+// v3.2: 改 reactive（之前是 ref({}) + editValues.value[key] 动态 key 赋值，Vue 3 不响应式！）
+// v-model="editValues[someKey]" 的 setter 是 "editValues[someKey] = newValue"
+// 如果 editValues 是 ref({})，Vue 不会追踪 .value[key] 的赋值 → v-model 双向绑定失效
+// 改成 reactive({}) 后，reactive proxy 会拦截 .[key] 赋值 → v-model 正常工作
+const editValues = reactive({}) // { [`${id}-${field}`]: string }
 const editError = ref('')      // 行内编辑错误（如 -1 价格）
 // trade_note tooltip hover
 const noteTip = ref(null)      // { x, y, text } | null
@@ -660,7 +664,7 @@ function editKey(id, field) {
 }
 function startEdit(id, field, currentValue) {
   editingCell.value = { id, field }
-  editValues.value[editKey(id, field)] = currentValue == null ? '' : String(currentValue)
+  editValues[editKey(id, field)] = currentValue == null ? '' : String(currentValue)
   editError.value = ''
 }
 function cancelEdit() {
@@ -669,7 +673,7 @@ function cancelEdit() {
 }
 async function commitEdit(id, field) {
   const key = editKey(id, field)
-  const raw = (editValues.value[key] ?? '').trim()
+  const raw = (editValues[key] ?? '').trim()
   editingCell.value = null
   // 空串 → 视为"清空这个字段"
   let value = null
@@ -704,9 +708,50 @@ async function commitEdit(id, field) {
   try {
     await updateWatchlist(id, { [field]: value })
     await refresh()
+    // v3.2: 保存成功反馈（用 v3.0 的 toast 工具）
+    showToast({
+      level: 'info',
+      text: `已保存 ${fieldLabel(field)}`,
+      subtext: formatFieldValue(field, value),
+      durationMs: 2500,
+    })
+    // 触发绿闪动画（v3.2 新增 class 切换）
+    flashField(id, field)
   } catch (e) {
-    editError.value = e.message
+    editError.value = e?.message || String(e)
+    showToast({
+      level: 'error',
+      text: `保存失败：${fieldLabel(field)}`,
+      subtext: e?.message || String(e),
+      durationMs: 5000,
+    })
   }
+}
+
+// v3.2: 字段名 → 用户友好名（toast 提示用）
+function fieldLabel(field) {
+  return {
+    cost_price: '成本价',
+    position: '持仓股数',
+    target_win: '止盈价',
+    target_loss: '止损价',
+    last_grid_price: '网格基准价',
+  }[field] || field
+}
+function formatFieldValue(field, value) {
+  if (value == null) return '已清空'
+  if (field === 'position') return `${value.toLocaleString('zh-CN')} 股`
+  return `→ ${value}`
+}
+
+// v3.2: 绿闪动画（保存成功的视觉反馈）
+const flashingCells = reactive({})  // { [`${id}-${field}`]: true 在闪烁中 }
+function flashField(id, field) {
+  const key = editKey(id, field)
+  flashingCells[key] = true
+  setTimeout(() => {
+    flashingCells[key] = false
+  }, 800)
 }
 
 // v2.8 补仓/减仓记账计算器
@@ -1510,8 +1555,9 @@ onUnmounted(() => {
                     v-else
                     @click="startEdit(w.id, 'cost_price', w.cost_price)"
                     :class="[
-                      'cursor-pointer hover:bg-slate-800/40 px-2 py-0.5 rounded inline-block min-w-[60px]',
+                      'cursor-pointer hover:bg-slate-800/40 px-2 py-0.5 rounded inline-block min-w-[60px] transition-colors duration-700',
                       w.cost_price != null ? 'text-slate-200' : 'text-slate-600',
+                      flashingCells[editKey(w.id, 'cost_price')] ? 'bg-emerald-500/30' : '',
                     ]"
                     :title="w.cost_price != null ? `成本 ${fmtPrice(w.cost_price)} · 点击修改` : '点击录入成本价'"
                   >
@@ -1535,8 +1581,9 @@ onUnmounted(() => {
                       v-else
                       @click="startEdit(w.id, 'last_grid_price', w.last_grid_price)"
                       :class="[
-                        'cursor-pointer hover:bg-slate-800/40 px-1.5 py-0.5 rounded inline-block min-w-[48px] text-right',
+                        'cursor-pointer hover:bg-slate-800/40 px-1.5 py-0.5 rounded inline-block min-w-[48px] text-right transition-colors duration-700',
                         w.last_grid_price != null ? 'text-fuchsia-300' : 'text-fuchsia-300/40 italic',
+                        flashingCells[editKey(w.id, 'last_grid_price')] ? 'bg-emerald-500/30' : '',
                       ]"
                       :title="w.last_grid_price != null
                                ? `网格基准 ${fmtPrice(w.last_grid_price)} · 步长 ${w.eff_grid_step_pct}% · 点击修改`
@@ -1574,8 +1621,9 @@ onUnmounted(() => {
                   v-else
                   @click="startEdit(w.id, 'target_win', w.target_win)"
                   :class="[
-                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px] transition-colors duration-700',
                     w.target_win != null ? 'text-emerald-300' : 'text-slate-600',
+                    flashingCells[editKey(w.id, 'target_win')] ? 'bg-emerald-500/30' : '',
                   ]"
                   :title="w.target_win != null ? `止盈 ${fmtPrice(w.target_win)} · 点击修改` : '点击录入止盈价'"
                 >
@@ -1601,8 +1649,9 @@ onUnmounted(() => {
                   v-else
                   @click="startEdit(w.id, 'target_loss', w.target_loss)"
                   :class="[
-                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px] transition-colors duration-700',
                     w.target_loss != null ? 'text-rose-300' : 'text-slate-600',
+                    flashingCells[editKey(w.id, 'target_loss')] ? 'bg-emerald-500/30' : '',
                   ]"
                   :title="w.target_loss != null ? `止损 ${fmtPrice(w.target_loss)} · 点击修改` : '点击录入止损价'"
                 >
@@ -1628,8 +1677,9 @@ onUnmounted(() => {
                   v-else
                   @click="startEdit(w.id, 'position', w.position)"
                   :class="[
-                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
+                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px] transition-colors duration-700',
                     w.position != null ? 'text-slate-200' : 'text-slate-600',
+                    flashingCells[editKey(w.id, 'position')] ? 'bg-emerald-500/30' : '',
                   ]"
                   :title="w.position != null ? `当前 ${fmtVol(w.position)} 股 · 点击修改` : '点击录入持仓'"
                 >

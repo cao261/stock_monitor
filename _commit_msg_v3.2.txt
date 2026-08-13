@@ -1,0 +1,36 @@
+fix(v3.2): 行内编辑 v-model 失修复 (Vue 3 reactivity 经典坑)
+
+## 根因
+v-model="editValues[someKey]" 表达式要求 editValues 是 reactive 才能触发双向绑定。
+之前 editValues 是 ref({})，v-model 编译后：
+  @input="v => editValues[someKey] = v"
+对 ref 内的普通对象动态 key 赋值 → 不触发响应式追踪
+→ input 实际是单向：用户敲字符时 v-model 拿不到最新值
+→ commitEdit 拿到的 raw 永远是 startEdit 设的初始值
+→ "假编辑" bug：UI 能改但没真正落库
+
+## 修复
+- editValues 改 reactive({})：reactive Proxy 拦截 [key] 赋值
+- 同步去掉所有 .value（reactive 没有 .value）
+- 5 个 span 加 transition-colors + flashingCells 触发 800ms 绿闪
+- commitEdit 成功 → showToast 提示 ✅ + 绿闪
+- commitEdit 失败 → showToast 提示 + editError 红字
+- 新增 fieldLabel() / formatFieldValue() 给 Toast 友好文案
+
+## 完整 PATCH 闭环测试
+后端 PATCH /api/watchlist/1 验证：
+  PATCH cost_price=1.555 → 200 + response cost=1.555
+  GET quotes → cost=1.555 ✅ 持久化
+  PATCH cost_price=null → 200 + cost=null ✅
+  恢复 → 200 ✅
+
+前端 v-model 修复（Node 模拟）：
+  修复前：editValues[key] = "1.5" 不被响应式追踪
+  修复后：reactive Proxy 拦截赋值，下次读拿到 "1.5"
+
+## 改动文件
+- frontend/src/components/Dashboard.vue
+  - reactive import + editValues 改 reactive
+  - 3 处 editValues.value[key] → editValues[key]
+  - 5 个 span 加绿闪 + flashingCells state
+  - commitEdit 加 Toast 反馈 + fieldLabel/formatFieldValue
