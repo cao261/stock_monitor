@@ -1,10 +1,11 @@
 """策略层 / 复盘战报。"""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
 import analyzer
@@ -13,10 +14,39 @@ import market_fetcher as mf
 from app import config
 from app.crud.watchlist import watchlist as crud
 from app.database import get_db
+from app.models.trade_log import TradeLog
 from app.services import llm
 from app.utils.trade_note_parser import parse_trade_note
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
+
+
+def get_today_trades(db: Session) -> list[dict]:
+    """v3.0: 查今日（本地时间 00:00~23:59）的所有真实交割单。
+
+    喂给 daily-summary 响应 + LLM 复盘 prompt（指令 8）。
+    """
+    today = datetime.now().date()
+    start = datetime.combine(today, time(0, 0, 0))
+    end = datetime.combine(today, time(23, 59, 59))
+    rows = (
+        db.query(TradeLog)
+        .filter(and_(TradeLog.created_at >= start, TradeLog.created_at <= end))
+        .order_by(TradeLog.created_at.asc())
+        .all()
+    )
+    return [
+        {
+            "id": r.id,
+            "ts_code": r.ts_code,
+            "action": r.action,
+            "price": round(float(r.price), 4),
+            "volume": int(r.volume),
+            "realized_pnl": round(float(r.realized_pnl), 2),
+            "created_at": r.created_at.isoformat(timespec="seconds"),
+        }
+        for r in rows
+    ]
 
 
 @router.get(
@@ -24,7 +54,7 @@ router = APIRouter(prefix="/strategy", tags=["strategy"])
     summary="今日盘后复盘战报（v2.3）",
 )
 def get_daily_summary(db: Session = Depends(get_db)) -> dict:
-    """拼装三大模块：大盘情绪 + 自选股战况 + 全市场异动龙头。
+    """拼装三大模块：大盘情绪 + 自选股战况 + 全市场异动龙头 + 今日交割单（v3.0）。
 
     用于前端"今日复盘战报"模态框。
     任何时刻都能调（盘中、盘后都行），逻辑只看当前快照。
@@ -182,6 +212,10 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
         for code, d in by_vol[:3]
     ]
 
+    # ===== v3.0: 今日真实交割单（喂给 LLM 复盘 + 前端展示）=====
+    today_trades_raw = get_today_trades(db)
+    today_pnl_total = round(sum(t["realized_pnl"] for t in today_trades_raw), 2)
+
     return {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "sentiment": {
@@ -197,6 +231,14 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
         "top_movers": {
             "by_change_pct": top_change,
             "by_volume": top_volume,
+        },
+        # v3.0: 今日真实交割单
+        # - 喂给 LLM（指令 8：审阅用户的"耐心持仓 / 严格止损 / 浮盈兑现"行为）
+        # - 前端"今日复盘战报"也会展示这个板块
+        "today_trades": {
+            "trades": today_trades_raw,
+            "total_count": len(today_trades_raw),
+            "total_realized_pnl": today_pnl_total,
         },
     }
 

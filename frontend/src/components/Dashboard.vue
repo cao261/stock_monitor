@@ -9,6 +9,7 @@ import {
   getSignals,
   getTopMovers,
   getWatchlist,
+  recordTrade,  // v3.0 真实交割（替换原来 PATCH 路径的 updateWatchlist 用法）
   refreshHistory,
   removeFromWatchlist,
   updateWatchlist,
@@ -749,6 +750,31 @@ function closeAdjustDialog() {
   adjustDialog.value.open = false
   adjustDialog.value.error = ''
 }
+
+// v3.0 Toast 通知：卖出/买入后弹一条红/绿色提示（含已实现盈亏）
+const toast = ref({
+  show: false,
+  level: 'info',  // 'buy' | 'sell' | 'error'
+  text: '',
+  subtext: '',
+  timer: null,
+})
+function showToast({ level, text, subtext = '', durationMs = 4500 }) {
+  // 清掉前一个 timer，避免快速连点叠加
+  if (toast.value.timer) {
+    clearTimeout(toast.value.timer)
+    toast.value.timer = null
+  }
+  toast.value = { show: true, level, text, subtext, timer: null }
+  toast.value.timer = setTimeout(() => {
+    toast.value.show = false
+  }, durationMs)
+}
+function dismissToast() {
+  if (toast.value.timer) clearTimeout(toast.value.timer)
+  toast.value.show = false
+}
+
 async function confirmAdjustDialog() {
   const d = adjustDialog.value
   const preview = adjustPreview.value
@@ -759,17 +785,45 @@ async function confirmAdjustDialog() {
   d.submitting = true
   d.error = ''
   try {
-    // 一次 PATCH 同步更新 3 个字段：成本 + 持仓 + 网格基准
-    // 注意：v2.7 起的 last_grid_price 也属于同一个 PATCH body
-    await updateWatchlist(d.w.id, {
-      cost_price: Number(preview.newCost.toFixed(4)),
-      position: preview.newPosition,
-      last_grid_price: preview.newGridRef,
+    // v3.0: 改调 POST /api/watchlist/{id}/trade（替代 v2.8 的 PATCH 路径）
+    // 后端会算加权平均 + 写 trade_log + 同步更新 last_grid_price
+    // preview.change 已经是带符号的整数（tq 本身），直接传
+    const r = await recordTrade(d.w.id, {
+      price: Number(d.tradePrice),
+      volume: preview.change,  // 正=买入，负=卖出
     })
+    const data = r.data
+    // 卖出且有已实现盈亏 → 弹显眼 Toast（红/绿按金额正负）
+    if (data.action === 'SELL') {
+      const pnl = data.realized_pnl
+      const isWin = pnl > 0
+      const isLoss = pnl < 0
+      const sign = pnl > 0 ? '+' : pnl < 0 ? '-' : ''
+      const pnlStr = `${sign}¥${Math.abs(pnl).toFixed(2)}`
+      showToast({
+        level: isWin ? 'sell-win' : isLoss ? 'sell-loss' : 'sell-flat',
+        text: `减仓成功！${data.trade_volume} 股 @ ${data.trade_price.toFixed(4)}`,
+        subtext: isWin
+          ? `🎉 本次实现盈利 ${pnlStr}`
+          : isLoss
+            ? `本次实现亏损 ${pnlStr}`
+            : `本次持平 ${pnlStr}`,
+        durationMs: 5500,
+      })
+    } else {
+      // 买入也给个轻提示（淡一些）
+      showToast({
+        level: 'buy',
+        text: `加仓成功！${data.trade_volume} 股 @ ${data.trade_price.toFixed(4)}`,
+        subtext: `新成本 ${data.new_cost_price.toFixed(4)} · 新基准 ${data.new_last_grid_price.toFixed(4)}`,
+        durationMs: 4000,
+      })
+    }
     await refresh()
     closeAdjustDialog()
   } catch (e) {
     d.error = `保存失败：${e?.message || e}`
+    showToast({ level: 'error', text: '交易失败', subtext: e?.message || String(e), durationMs: 6000 })
   } finally {
     d.submitting = false
   }
@@ -2361,6 +2415,69 @@ onUnmounted(() => {
           </div>
         </div>
       </div>
+    </Teleport>
+
+    <!-- ====================== v3.0 交易结果 Toast ====================== -->
+    <Teleport to="body">
+      <Transition
+        enter-active-class="transition ease-out duration-200"
+        enter-from-class="opacity-0 translate-y-2 scale-95"
+        enter-to-class="opacity-100 translate-y-0 scale-100"
+        leave-active-class="transition ease-in duration-150"
+        leave-from-class="opacity-100 scale-100"
+        leave-to-class="opacity-0 scale-95"
+      >
+        <div
+          v-if="toast.show"
+          class="fixed top-6 left-1/2 -translate-x-1/2 z-[80] pointer-events-auto"
+          @click="dismissToast"
+        >
+          <div
+            class="relative px-5 py-3 rounded-xl border-2 shadow-2xl backdrop-blur-md min-w-[320px] max-w-md
+                   before:absolute before:inset-0 before:rounded-xl before:p-[1px] before:-z-10 before:pointer-events-none"
+            :class="{
+              'bg-emerald-950/95 border-emerald-400/60 before:bg-gradient-to-br before:from-emerald-500/50 before:to-emerald-300/30': toast.level === 'sell-win',
+              'bg-rose-950/95 border-rose-400/60 before:bg-gradient-to-br before:from-rose-500/50 before:to-rose-300/30': toast.level === 'sell-loss' || toast.level === 'error',
+              'bg-slate-900/95 border-slate-500/60 before:bg-gradient-to-br before:from-slate-500/40 before:to-slate-400/20': toast.level === 'sell-flat',
+              'bg-sky-950/95 border-sky-400/60 before:bg-gradient-to-br before:from-sky-500/50 before:to-sky-300/30': toast.level === 'buy',
+            }"
+          >
+            <div class="flex items-start gap-3">
+              <div class="text-2xl flex-shrink-0 leading-none mt-0.5">
+                <span v-if="toast.level === 'sell-win'">🎉</span>
+                <span v-else-if="toast.level === 'sell-loss'">📉</span>
+                <span v-else-if="toast.level === 'sell-flat'">🤝</span>
+                <span v-else-if="toast.level === 'buy'">📥</span>
+                <span v-else>⚠️</span>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div
+                  class="text-sm font-semibold font-mono"
+                  :class="{
+                    'text-emerald-200': toast.level === 'sell-win',
+                    'text-rose-200': toast.level === 'sell-loss' || toast.level === 'error',
+                    'text-slate-200': toast.level === 'sell-flat',
+                    'text-sky-200': toast.level === 'buy',
+                  }"
+                >{{ toast.text }}</div>
+                <div v-if="toast.subtext" class="text-xs mt-0.5 font-mono"
+                  :class="{
+                    'text-emerald-300/90': toast.level === 'sell-win',
+                    'text-rose-300/90': toast.level === 'sell-loss' || toast.level === 'error',
+                    'text-slate-300/90': toast.level === 'sell-flat',
+                    'text-sky-300/90': toast.level === 'buy',
+                  }"
+                >{{ toast.subtext }}</div>
+              </div>
+              <button
+                @click.stop="dismissToast"
+                class="text-slate-500 hover:text-slate-200 text-lg leading-none w-5 h-5 flex items-center justify-center"
+                title="关闭"
+              >×</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
     </Teleport>
   </div>
 </template>

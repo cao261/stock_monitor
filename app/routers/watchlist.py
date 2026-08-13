@@ -1,6 +1,9 @@
 """/watchlist 路由：自选股 CRUD。"""
 from __future__ import annotations
 
+import logging
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -9,6 +12,8 @@ import analyzer
 import market_fetcher as mf
 from app.crud.watchlist import watchlist as crud
 from app.database import get_db
+from app.models.trade_log import TradeLog
+from app.schemas.trade_log import TradeRequest, TradeResponse
 from app.schemas.watchlist import (
     WatchlistCreate,
     WatchlistRead,
@@ -17,6 +22,7 @@ from app.schemas.watchlist import (
 from app.schemas.watchlist_quote import WatchlistQuote
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
+trade_logger = logging.getLogger("trade")
 
 
 @router.get(
@@ -353,3 +359,130 @@ def delete_watchlist(stock_id: int, db: Session = Depends(get_db)) -> None:
         )
     crud.delete(db, obj)
     return None
+
+
+# ====================== v3.0 交易接口（写入 trade_log）======================
+@router.post(
+    "/{stock_id}/trade",
+    response_model=TradeResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="v3.0 真实交割：买入/卖出（自动算加权平均 + 写 trade_log）",
+)
+def execute_trade(
+    stock_id: int,
+    payload: TradeRequest,
+    db: Session = Depends(get_db),
+) -> TradeResponse:
+    """用户在前端补仓/减仓 Dialog 里点"确认记账"后调的接口。
+
+    算法（与 v2.8 客户端预览一致，这里服务端再算一遍作权威）：
+        abs_vol = abs(volume)
+        if volume > 0 (BUY):
+            new_pos = (old_pos or 0) + volume
+            new_cost = (
+                price  # 首次建仓
+                if (old_pos is None or old_pos == 0 or old_cost is None)
+                else (old_cost * old_pos + price * volume) / new_pos
+            )
+            realized_pnl = 0.0
+        else:  # SELL
+            if old_pos is None or old_pos < abs_vol:
+                raise 400 "减仓数量超过当前持仓"
+            new_pos = old_pos - abs_vol
+            new_cost = old_cost  # 减仓不动成本
+            realized_pnl = (price - old_cost) * abs_vol  # 已实现盈亏
+
+        # 无论买卖：last_grid_price 同步为本次成交价
+        new_grid_ref = price
+
+    写：watchlist + trade_log（同一事务，原子性）
+    """
+    obj = crud.get(db, stock_id)
+    if not obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="自选股不存在"
+        )
+
+    price = float(payload.price)
+    signed_vol = int(payload.volume)
+    abs_vol = abs(signed_vol)
+    is_buy = signed_vol > 0
+    action = "BUY" if is_buy else "SELL"
+
+    old_pos = obj.position
+    old_cost = obj.cost_price
+
+    # ===== 核心计算 =====
+    if is_buy:
+        # 允许从空仓建仓（old_pos is None or 0）
+        base_pos = int(old_pos) if (old_pos is not None and old_pos > 0) else 0
+        base_cost = float(old_cost) if (old_cost is not None and old_cost > 0 and base_pos > 0) else 0.0
+        new_pos = base_pos + abs_vol
+        if base_pos <= 0 or base_cost <= 0:
+            new_cost = price  # 首次建仓
+        else:
+            new_cost = (base_cost * base_pos + price * abs_vol) / new_pos
+        realized_pnl = 0.0
+    else:
+        # 卖出
+        if old_pos is None or old_pos < abs_vol:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"减仓失败：当前持仓 {old_pos or 0} 股，不足以卖出 {abs_vol} 股"
+                ),
+            )
+        if old_cost is None or old_cost <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="持仓缺少成本价，无法计算已实现盈亏（请先在表格里录入成本）",
+            )
+        new_pos = int(old_pos) - abs_vol
+        new_cost = float(old_cost)  # 减仓不动成本
+        realized_pnl = round((price - float(old_cost)) * abs_vol, 2)
+
+    new_grid_ref = price
+
+    # ===== 写 watchlist（直接 ORM，避免走 crud.update 的 exclude_unset 坑）=====
+    obj.cost_price = round(float(new_cost), 4)
+    obj.position = int(new_pos)
+    obj.last_grid_price = float(new_grid_ref)
+
+    # ===== 写 trade_log =====
+    log = TradeLog(
+        ts_code=obj.ts_code,
+        action=action,
+        price=float(price),
+        volume=int(abs_vol),
+        realized_pnl=float(realized_pnl),
+    )
+    db.add(log)
+    try:
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        trade_logger.exception("trade write failed: %r", e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"交易记录写入失败：{e}",
+        ) from e
+    db.refresh(obj)
+    db.refresh(log)
+
+    trade_logger.info(
+        "trade: %s id=%d %s %d股@%.4f pnl=%.2f → pos=%d cost=%.4f grid=%.4f",
+        obj.ts_code, log.id, action, abs_vol, price, realized_pnl,
+        obj.position, obj.cost_price, obj.last_grid_price,
+    )
+
+    return TradeResponse(
+        trade_id=log.id,
+        ts_code=obj.ts_code,
+        action=action,                # type: ignore[arg-type]
+        trade_price=price,
+        trade_volume=abs_vol,
+        realized_pnl=realized_pnl,
+        new_position=int(obj.position),
+        new_cost_price=float(obj.cost_price),
+        new_last_grid_price=float(obj.last_grid_price),
+    )

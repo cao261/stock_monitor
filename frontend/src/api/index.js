@@ -158,4 +158,18 @@ export function getAiReport() {
   return api.post('/strategy/ai-report')
 }
 
+/**
+ * v3.0 真实交割：买入/卖出（自动算加权平均 + 写 trade_log）
+ * POST /watchlist/{id}/trade
+ * @param {number} id - watchlist 主键
+ * @param {{ price: number, volume: number }} payload - volume 正=买入，负=卖出
+ * @returns {Promise<AxiosResponse<{
+ *   trade_id, ts_code, action, trade_price, trade_volume, realized_pnl,
+ *   new_position, new_cost_price, new_last_grid_price
+ * }>>}
+ */
+export function recordTrade(id, payload) {
+  return api.post(`/watchlist/${id}/trade`, payload)
+}
+
 export default api

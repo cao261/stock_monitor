@@ -1,0 +1,33 @@
+feat(v3.0): 交割单记账 + 已实现盈亏 + LLM 复盘指令 9
+
+## 任务 1：trade_log 表（新表）
+- app/models/trade_log.py：id / ts_code / action(BUY|SELL) / price / volume(永远正) / realized_pnl / created_at
+- ts_code 不存 FK（watchlist 删除后交割单永留）
+- app/database.py init_db 加 import，create_all 自动建表
+- 双索引：(ts_code, created_at) + (created_at)
+
+## 任务 2：POST /api/watchlist/{id}/trade 接口
+替代 v2.8 PATCH 路径：
+- BUY：加权平均 cost_price（首次建仓直接 = price）
+- SELL：cost 不动，算 realized_pnl = (price - cost) * abs(volume)
+- 无论买卖：last_grid_price 同步 = 本次成交价
+- 同一事务写 watchlist + trade_log
+- 边界：减仓 > 持仓 → 400；缺 cost → 400
+
+## 任务 3：LLM 复盘 prompt 加指令 9（v3.0）
+- 4 分支：盈利兑现夸奖 / 亏损止损客观 / 无操作耐心持仓 / 过度交易预警
+- 强调"成熟的亏损"vs"坏的亏损"区分
+- 多档定投连续 BUY 正面肯定
+
+## 任务 4：前端 Dialog + Toast
+- confirmAdjustDialog 改调 recordTrade
+- 新增 toast ref：4 种 level (sell-win/sell-loss/sell-flat/buy/error)
+- Teleport + Transition 动画
+- 卖出时弹显眼 Toast：本次实现盈利 +¥70 / 亏损 -¥70
+
+## 验证（curl）
+sh589130 实战：
+- SELL 500@1.55 → realized_pnl = -70 ✅
+- BUY 1000@1.436 → new_cost = 1.5207 ✅
+- SELL 9999 → 400 拦截 ✅
+- daily-summary.today_trades 正确展示两笔 + total_pnl = -70 ✅

@@ -50,7 +50,7 @@ def init_db() -> None:
     - migrate_db: 给已有表加新列（升级场景）
     """
     # 导入模型以触发 metadata 注册
-    from app.models import alert_rule, watchlist  # noqa: F401
+    from app.models import alert_rule, trade_log, watchlist  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
     migrate_db(engine)
