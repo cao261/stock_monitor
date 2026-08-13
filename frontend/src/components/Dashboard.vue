@@ -672,8 +672,19 @@ function cancelEdit() {
   editError.value = ''
 }
 async function commitEdit(id, field) {
+  // v3.2 防重入：Enter 触发 commitEdit → editingCell 置 null → input 从 DOM 移除
+  // → blur 事件再次触发 commitEdit → 同一编辑发 2 次 PATCH。
+  // 用 editingCell 作为"正在编辑"的锁：二次进入时已非编辑态，直接丢弃。
+  if (!editingCell.value || editingCell.value.id !== id || editingCell.value.field !== field) {
+    return
+  }
   const key = editKey(id, field)
-  const raw = (editValues[key] ?? '').trim()
+  // v3.2 致命坑：行内编辑 input 都是 type="number"，v-model 会自动把输入值转成 number
+  // （vModelText 指令对 number input 做 looseToNumber），所以 editValues[key] 可能是
+  // number（如 1.777）而不是 string —— 直接 .trim() 会 TypeError，commitEdit 整个崩溃，
+  // 数据永远不提交（"假编辑"bug 的另一个真凶）。
+  // 修法：String() 兜底转换，number / string / null 一律安全。
+  const raw = String(editValues[key] ?? '').trim()
   editingCell.value = null
   // 空串 → 视为"清空这个字段"
   let value = null
@@ -1377,7 +1388,7 @@ onUnmounted(() => {
               sentimentGlowClass(sentiment.score),
             ]"
           >
-            {{ sentiment.score.toFixed(1) }}
+            {{ sentiment.score != null ? sentiment.score.toFixed(1) : '-' }}
           </p>
           <p class="text-sm text-slate-400 mt-2 font-medium">
             {{ sentimentLabel(sentiment.score) }}
@@ -2685,6 +2696,7 @@ onUnmounted(() => {
               'bg-rose-950/95 border-rose-400/60 before:bg-gradient-to-br before:from-rose-500/50 before:to-rose-300/30': toast.level === 'sell-loss' || toast.level === 'error',
               'bg-slate-900/95 border-slate-500/60 before:bg-gradient-to-br before:from-slate-500/40 before:to-slate-400/20': toast.level === 'sell-flat',
               'bg-sky-950/95 border-sky-400/60 before:bg-gradient-to-br before:from-sky-500/50 before:to-sky-300/30': toast.level === 'buy',
+              'bg-emerald-950/95 border-emerald-400/60 before:bg-gradient-to-br before:from-emerald-500/50 before:to-emerald-300/30': toast.level === 'info',
             }"
           >
             <div class="flex items-start gap-3">
@@ -2693,13 +2705,14 @@ onUnmounted(() => {
                 <span v-else-if="toast.level === 'sell-loss'">📉</span>
                 <span v-else-if="toast.level === 'sell-flat'">🤝</span>
                 <span v-else-if="toast.level === 'buy'">📥</span>
+                <span v-else-if="toast.level === 'info'">✅</span>
                 <span v-else>⚠️</span>
               </div>
               <div class="flex-1 min-w-0">
                 <div
                   class="text-sm font-semibold font-mono"
                   :class="{
-                    'text-emerald-200': toast.level === 'sell-win',
+                    'text-emerald-200': toast.level === 'sell-win' || toast.level === 'info',
                     'text-rose-200': toast.level === 'sell-loss' || toast.level === 'error',
                     'text-slate-200': toast.level === 'sell-flat',
                     'text-sky-200': toast.level === 'buy',
@@ -2707,7 +2720,7 @@ onUnmounted(() => {
                 >{{ toast.text }}</div>
                 <div v-if="toast.subtext" class="text-xs mt-0.5 font-mono"
                   :class="{
-                    'text-emerald-300/90': toast.level === 'sell-win',
+                    'text-emerald-300/90': toast.level === 'sell-win' || toast.level === 'info',
                     'text-rose-300/90': toast.level === 'sell-loss' || toast.level === 'error',
                     'text-slate-300/90': toast.level === 'sell-flat',
                     'text-sky-300/90': toast.level === 'buy',
