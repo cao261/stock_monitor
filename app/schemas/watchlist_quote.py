@@ -75,4 +75,30 @@ class WatchlistQuote(BaseModel):
         False, description="当前价 ≥ eff_target_win：trade_note 里的止盈位已到"
     )
 
+    # ===== v2.7 网格动态追踪 =====
+    # 用户在数据库里手动维护的"上次网格加/减仓基准价"。前端有行内编辑 + 🔄 一键同步按钮。
+    last_grid_price: float | None = Field(
+        None, description="上次网格加/减仓基准价（元/股）"
+    )
+    # 从 trade_note 自动识别的网格步长（如 "每跌 5% 加仓" → 5.0）
+    eff_grid_step_pct: float | None = Field(
+        None, description="从 trade_note 提取的网格步长 %（如 5.0 代表每跌 5%）"
+    )
+    # 实际计算用的基准价（last_grid_price ?? cost_price）
+    grid_reference_price: float | None = Field(
+        None, description="实际网格计算用的基准价（last_grid_price 优先，cost_price 兜底）"
+    )
+    # 当前价相对基准价的涨跌幅 %（正=高于基准，负=低于基准）
+    grid_distance: float | None = Field(
+        None, description="(现价 - 基准价) / 基准价 * 100，正=高于基准"
+    )
+    # 网格买入信号：grid_distance <= -grid_step_pct（跌到位 → 加仓机会）
+    is_grid_buy: bool = Field(
+        False, description="跌穿网格步长：触发买入加仓"
+    )
+    # 网格卖出信号：grid_distance >= grid_step_pct（涨到位 → 减仓机会）
+    is_grid_sell: bool = Field(
+        False, description="突破网格步长：触发卖出减仓"
+    )
+
     model_config = ConfigDict(from_attributes=True)

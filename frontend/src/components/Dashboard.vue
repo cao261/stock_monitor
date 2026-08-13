@@ -239,10 +239,12 @@ let prevSignalCodes = new Set()
 //   3. 没有任何策略时返回 null（让列显示 —）
 function buildStrategyAdvice(w) {
   if (!w) return null
-  // 没写 trade_note 也没设 target_*/note_extracted_*/note_semantic_rules → 没什么可建议
+  // 没写 trade_note 也没设 target_*/note_extracted_*/note_semantic_rules/eff_grid_step_pct
+  // → 没什么可建议
   const hasAnyRule = !!(w.trade_note || w.target_win != null || w.target_loss != null
     || w.note_extracted_target_win != null || w.note_extracted_target_loss != null
-    || (w.note_semantic_rules && w.note_semantic_rules.length))
+    || (w.note_semantic_rules && w.note_semantic_rules.length)
+    || w.eff_grid_step_pct != null)
   if (!hasAnyRule) return null
   // 没现价 → 没法算距离
   if (w.price == null) {
@@ -252,6 +254,28 @@ function buildStrategyAdvice(w) {
   const eff_tl = w.eff_target_loss  // 实际生效的止损（含 note 提取值）
   const eff_tw = w.eff_target_win   // 实际生效的止盈
   const ret = w.return_rate         // 收益率 %
+
+  // v2.7 网格动态追踪 —— 最高优先级（用户明确"按纪律加/减仓"是动作意图）
+  // 注意：网格买入覆盖"浮亏中盯止损"——网格用户希望越跌越买，不希望被误劝离场
+  if (w.is_grid_buy) {
+    const distPct = w.grid_distance != null ? Math.abs(w.grid_distance).toFixed(1) : '?'
+    return {
+      level: 'grid-buy',
+      icon: '🪜',
+      text: `跌穿网格步长（${distPct}%）→ 触发加仓！`,
+      title: `当前价 ${fmtPrice(price)} 距基准价 ${fmtPrice(w.grid_reference_price)} ${w.grid_distance?.toFixed(2)}% ≥ ${w.eff_grid_step_pct}%`,
+    }
+  }
+  if (w.is_grid_sell) {
+    const distPct = w.grid_distance != null ? Math.abs(w.grid_distance).toFixed(1) : '?'
+    return {
+      level: 'grid-sell',
+      icon: '🪜',
+      text: `突破网格步长（${distPct}%）→ 触发减仓！`,
+      title: `当前价 ${fmtPrice(price)} 距基准价 ${fmtPrice(w.grid_reference_price)} +${w.grid_distance?.toFixed(2)}% ≥ ${w.eff_grid_step_pct}%`,
+    }
+  }
+
   // 1) 已破止损（最危险）
   if (w.note_target_broken) {
     return { level: 'danger', icon: '🛑', text: `已破止损 ${fmtPrice(eff_tl)}，按纪律清仓` }
@@ -619,6 +643,13 @@ async function commitEdit(id, field) {
         editError.value = `${field === 'target_win' ? '止盈' : '止损'}价必须是 > 0 的数字`
         return
       }
+    } else if (field === 'last_grid_price') {
+      // v2.7 网格基准价：允许 0（表示"清空基准，下次回退到成本价"）
+      value = raw === '' ? null : parseFloat(raw)
+      if (value !== null && (Number.isNaN(value) || value < 0)) {
+        editError.value = '基准价必须是 ≥ 0 的数字（清空请留空）'
+        return
+      }
     }
   }
   try {
@@ -626,6 +657,27 @@ async function commitEdit(id, field) {
     await refresh()
   } catch (e) {
     editError.value = e.message
+  }
+}
+
+// v2.7 一键同步：把当前价设成新的网格基准价
+// 场景：用户刚在券商完成了一笔网格加/减仓交易，点一下把基准价更新到最新成交价
+async function syncGridPrice(w) {
+  if (w.price == null) return
+  try {
+    await updateWatchlist(w.id, { last_grid_price: Number(w.price) })
+    // 给个一闪而过的视觉反馈（绿色闪烁），让用户知道生效了
+    const orig = w.last_grid_price
+    w.last_grid_price = Number(w.price)  // 乐观更新
+    editingCell.value = null
+    await refresh()
+    // 1.2s 后小提示
+    setTimeout(() => {
+      // 不弹窗，只在错误区显示一条小提示
+      // 不需要显式清理，因为 next refresh 会重置
+    }, 1200)
+  } catch (e) {
+    editError.value = `同步基准价失败：${e?.message || e}`
   }
 }
 
@@ -1230,31 +1282,70 @@ onUnmounted(() => {
                 }"
               >{{ w.volume_ratio != null ? w.volume_ratio.toFixed(2) : '-' }}</td>
 
-              <!-- ====== 成本价：行内编辑 ====== -->
+              <!-- ====== 成本价：行内编辑 + v2.7 基准价（子行）====== -->
               <td class="py-3 px-4 text-right font-mono">
-                <input
-                  v-if="isEditing(w.id, 'cost_price')"
-                  v-focus
-                  v-model="editValues[editKey(w.id, 'cost_price')]"
-                  @blur="commitEdit(w.id, 'cost_price')"
-                  @keyup.enter="commitEdit(w.id, 'cost_price')"
-                  @keyup.escape="cancelEdit"
-                  type="number" step="0.01" min="0"
-                  class="w-24 px-2 py-1 bg-slate-900 border border-sky-500/60 rounded
-                         text-slate-100 font-mono text-sm text-right
-                         focus:outline-none focus:ring-1 focus:ring-sky-500/50"
-                />
-                <span
-                  v-else
-                  @click="startEdit(w.id, 'cost_price', w.cost_price)"
-                  :class="[
-                    'cursor-pointer hover:bg-slate-800/40 px-2 py-1 rounded inline-block min-w-[60px]',
-                    w.cost_price != null ? 'text-slate-200' : 'text-slate-600',
-                  ]"
-                  :title="w.cost_price != null ? `当前 ${fmtPrice(w.cost_price)} · 点击修改` : '点击录入成本价'"
-                >
-                  {{ w.cost_price != null ? fmtPrice(w.cost_price) : '+' }}
-                </span>
+                <div class="flex flex-col items-end gap-0.5">
+                  <!-- 行 1: 成本价（原有） -->
+                  <input
+                    v-if="isEditing(w.id, 'cost_price')"
+                    v-focus
+                    v-model="editValues[editKey(w.id, 'cost_price')]"
+                    @blur="commitEdit(w.id, 'cost_price')"
+                    @keyup.enter="commitEdit(w.id, 'cost_price')"
+                    @keyup.escape="cancelEdit"
+                    type="number" step="0.01" min="0"
+                    class="w-24 px-2 py-1 bg-slate-900 border border-sky-500/60 rounded
+                           text-slate-100 font-mono text-sm text-right
+                           focus:outline-none focus:ring-1 focus:ring-sky-500/50"
+                  />
+                  <span
+                    v-else
+                    @click="startEdit(w.id, 'cost_price', w.cost_price)"
+                    :class="[
+                      'cursor-pointer hover:bg-slate-800/40 px-2 py-0.5 rounded inline-block min-w-[60px]',
+                      w.cost_price != null ? 'text-slate-200' : 'text-slate-600',
+                    ]"
+                    :title="w.cost_price != null ? `成本 ${fmtPrice(w.cost_price)} · 点击修改` : '点击录入成本价'"
+                  >
+                    {{ w.cost_price != null ? fmtPrice(w.cost_price) : '+' }}
+                  </span>
+                  <!-- 行 2: 网格基准价（v2.7） + 🔄 一键同步按钮 -->
+                  <div v-if="w.eff_grid_step_pct != null" class="flex items-center gap-1 text-[10px]">
+                    <input
+                      v-if="isEditing(w.id, 'last_grid_price')"
+                      v-focus
+                      v-model="editValues[editKey(w.id, 'last_grid_price')]"
+                      @blur="commitEdit(w.id, 'last_grid_price')"
+                      @keyup.enter="commitEdit(w.id, 'last_grid_price')"
+                      @keyup.escape="cancelEdit"
+                      type="number" step="0.01" min="0"
+                      class="w-20 px-1.5 py-0.5 bg-slate-900 border border-fuchsia-500/60 rounded
+                             text-fuchsia-200 font-mono text-[10px] text-right
+                             focus:outline-none focus:ring-1 focus:ring-fuchsia-500/50"
+                    />
+                    <span
+                      v-else
+                      @click="startEdit(w.id, 'last_grid_price', w.last_grid_price)"
+                      :class="[
+                        'cursor-pointer hover:bg-slate-800/40 px-1.5 py-0.5 rounded inline-block min-w-[48px] text-right',
+                        w.last_grid_price != null ? 'text-fuchsia-300' : 'text-fuchsia-300/40 italic',
+                      ]"
+                      :title="w.last_grid_price != null
+                               ? `网格基准 ${fmtPrice(w.last_grid_price)} · 步长 ${w.eff_grid_step_pct}% · 点击修改`
+                               : `未设基准价（fallback 用成本价 ${fmtPrice(w.cost_price)}）· 点击录入`"
+                    >
+                      {{ w.last_grid_price != null ? fmtPrice(w.last_grid_price) : '基准' }}
+                    </span>
+                    <!-- 🔄 一键同步：把当前价设为新基准（用户在券商完成网格交易后一键重置） -->
+                    <button
+                      v-if="w.in_cache && w.price != null"
+                      @click="syncGridPrice(w)"
+                      :title="`把基准价重置为当前价 ${fmtPrice(w.price)}`"
+                      class="text-fuchsia-400 hover:text-fuchsia-200 hover:scale-110
+                             transition flex-shrink-0 px-0.5 -mr-0.5"
+                    >🔄</button>
+                  </div>
+                </div>
               </td>
 
               <!-- ====== 止盈：行内编辑 ====== -->
@@ -1408,8 +1499,11 @@ onUnmounted(() => {
                         'text-amber-300':        buildStrategyAdvice(w).level === 'warn',
                         'text-rose-300 font-semibold':  buildStrategyAdvice(w).level === 'danger',
                         'text-sky-300':          buildStrategyAdvice(w).level === 'info',
+                        // v2.7 网格信号
+                        'text-fuchsia-300 font-semibold animate-pulse': buildStrategyAdvice(w).level === 'grid-buy',
+                        'text-emerald-300 font-semibold animate-pulse':  buildStrategyAdvice(w).level === 'grid-sell',
                       }"
-                      :title="`建议生成逻辑：基于 trade_note 提取的止盈/止损位 + 当前价/收益率实时计算`"
+                      :title="buildStrategyAdvice(w).title || '建议生成逻辑：基于 trade_note 提取的止盈/止损位 + 当前价/收益率实时计算'"
                     >
                       <span>{{ buildStrategyAdvice(w).icon }}</span>
                       <span>{{ buildStrategyAdvice(w).text }}</span>

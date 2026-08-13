@@ -79,6 +79,8 @@ def migrate_db(engine) -> None:
         # v1.2
         ("target_win",  "ALTER TABLE watchlist ADD COLUMN target_win  FLOAT"),
         ("target_loss", "ALTER TABLE watchlist ADD COLUMN target_loss FLOAT"),
+        # v2.7 网格动态追踪
+        ("last_grid_price", "ALTER TABLE watchlist ADD COLUMN last_grid_price FLOAT"),
     ]
     with engine.begin() as conn:
         for col, ddl in inspections:

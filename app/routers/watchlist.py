@@ -126,6 +126,15 @@ async def list_watchlist_quotes(
             cur_price and eff_target_win and cur_price >= eff_target_win
         )
 
+        # ===== v2.7 网格动态追踪 =====
+        eff_grid_step_pct = note_parsed["grid_step_pct"]
+        grid_sig = analyzer.check_grid_signals(
+            price=cur_price,
+            last_grid_price=item.last_grid_price,
+            cost_price=item.cost_price,
+            grid_step_pct=eff_grid_step_pct,
+        )
+
         if quote is None:
             result.append(
                 WatchlistQuote(
@@ -153,6 +162,13 @@ async def list_watchlist_quotes(
                     # v2.6.2: cache miss 时取不到现价，所以这两个字段为 False
                     note_target_broken=False,
                     note_target_reached=False,
+                    # v2.7 网格追踪
+                    last_grid_price=item.last_grid_price,
+                    eff_grid_step_pct=eff_grid_step_pct,
+                    grid_reference_price=grid_sig["grid_reference_price"],
+                    grid_distance=grid_sig["grid_distance"],
+                    is_grid_buy=grid_sig["is_grid_buy"],
+                    is_grid_sell=grid_sig["is_grid_sell"],
                 )
             )
             continue
@@ -194,6 +210,13 @@ async def list_watchlist_quotes(
                 # v2.6.2
                 note_target_broken=note_target_broken,
                 note_target_reached=note_target_reached,
+                # v2.7 网格追踪
+                last_grid_price=item.last_grid_price,
+                eff_grid_step_pct=eff_grid_step_pct,
+                grid_reference_price=grid_sig["grid_reference_price"],
+                grid_distance=grid_sig["grid_distance"],
+                is_grid_buy=grid_sig["is_grid_buy"],
+                is_grid_sell=grid_sig["is_grid_sell"],
             )
         )
     return result

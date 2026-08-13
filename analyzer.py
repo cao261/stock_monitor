@@ -199,3 +199,50 @@ def check_signals(
         "trade_message": trade_message,
         "calculated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+# ====================== 功能 C：网格动态追踪（v2.7）======================
+def check_grid_signals(
+    price: float | None,
+    last_grid_price: float | None,
+    cost_price: float | None,
+    grid_step_pct: float | None,
+) -> dict[str, Any]:
+    """根据"现价 vs 基准价"判断网格加减仓信号。
+
+    算法（与用户拍板的方案一致）：
+        grid_reference = last_grid_price or cost_price
+        if grid_reference and grid_step_pct and price:
+            grid_distance = (price - grid_reference) / grid_reference * 100
+            is_grid_buy  = grid_distance <= -grid_step_pct   # 跌到位 → 加仓
+            is_grid_sell = grid_distance >=  grid_step_pct   # 涨到位 → 减仓
+
+    任何前置条件缺失（无现价 / 无基准价 / 无步长）都返回"无信号"。
+    """
+    empty: dict[str, Any] = {
+        "grid_reference_price": None,
+        "grid_distance": None,
+        "is_grid_buy": False,
+        "is_grid_sell": False,
+    }
+    # 前置条件：现价 + 步长 + 基准价（last_grid_price 优先，fallback cost_price）
+    if price is None or price <= 0:
+        return empty
+    if grid_step_pct is None or grid_step_pct <= 0:
+        return empty
+    reference = (
+        last_grid_price if (last_grid_price is not None and last_grid_price > 0) else cost_price
+    )
+    if reference is None or reference <= 0:
+        return empty
+
+    grid_distance = round((float(price) - float(reference)) / float(reference) * 100.0, 2)
+    is_grid_buy = bool(grid_distance <= -float(grid_step_pct))
+    is_grid_sell = bool(grid_distance >= float(grid_step_pct))
+
+    return {
+        "grid_reference_price": float(reference),
+        "grid_distance": grid_distance,
+        "is_grid_buy": is_grid_buy,
+        "is_grid_sell": is_grid_sell,
+    }

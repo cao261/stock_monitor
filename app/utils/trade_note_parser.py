@@ -4,15 +4,16 @@
 - "跌破 1620 就清仓"  →  target_loss = 1620
 - "突破 1850 减半仓"  →  target_win = 1850
 - "次日不连板清仓"     →  纯语义规则，AI 监工处理
-- "网格策略（底仓30%）"  →  纯策略描述，不提取数字
+- "网格策略（底仓30%）每跌 5% 加仓"  →  grid_step_pct = 5
 
 返回结构给前端：
 {
-    "target_loss": float | None,   # 智能识别的止损价
-    "target_win":  float | None,   # 智能识别的止盈价
-    "loss_patterns":  [str, ...],  # 命中的止损模式（调试用）
-    "win_patterns":   [str, ...],  # 命中的止盈模式
-    "semantic_rules": [str, ...],  # 命中的纯语义规则（不提取数字）
+    "target_loss":   float | None,   # 智能识别的止损价
+    "target_win":    float | None,   # 智能识别的止盈价
+    "loss_patterns": [str, ...],     # 命中的止损模式（调试用）
+    "win_patterns":  [str, ...],     # 命中的止盈模式
+    "semantic_rules":[str, ...],     # 命中的纯语义规则（不提取数字）
+    "grid_step_pct": float | None,   # v2.7: 网格步长（"每跌5%" 中的 5）
 }
 
 设计原则：
@@ -26,7 +27,7 @@ import re
 from typing import TypedDict
 
 
-# 止损关键词：跌破/破位/止损/杀跌到/跌穿/...
+# 止损关键词：跌破/破位/止损/杀跌到/...
 # 注意：必须在止盈关键词之前匹配；不写单字 "破"（避免被 "突破 18.50" 误命中）
 _LOSS_KEYWORDS = (
     r"(?:跌破|破位|止损|杀跌到|杀到|跌到|跌穿|下破|杀穿|止损位|"
@@ -45,7 +46,23 @@ _WIN_RE = re.compile(_WIN_KEYWORDS + r"\s*" + _PRICE_PATTERN)
 # 日线数字屏蔽："跌破 5 日线" / "跌破5日线" / "跌破 10 日线" → 不应把 5 / 10 当价格
 _DAYLINE_RE = re.compile(r"\d+\s*日线")
 
+# ===== v2.7 网格步长提取 =====
+# 主模式：「每(?:下跌|跌|反弹|涨|上涨)?(\d+(?:\.\d+)?)%」
+# 用户原话：
+#   - "每下跌5%加仓1手"          → 5
+#   - "每反弹5%卖出1手"          → 5
+#   - "每跌 3% 加仓 / 每涨 3% 卖" → 3
+# 取**第一个**匹配
+_GRID_STEP_RE = re.compile(
+    r"每\s*(?:下跌|跌|反弹|涨|上涨|下|上)?\s*(\d+(?:\.\d+)?)\s*%"
+)
+# 兜底：直接写 "网格步长 5%" / "步长 3%" / "网格幅度 7%"
+_GRID_STEP_FALLBACK_RE = re.compile(
+    r"(?:网格步长|步长|网格幅度)\s*[::]?\s*(\d+(?:\.\d+)?)\s*%"
+)
+
 # 纯语义规则（不提取数字，但标记"有规则"）
+# 注意：用 (?<![无非同]) 否定前缀屏蔽，避免 "无网格" / "非底仓" 被误命中
 _SEMANTIC_RULES = [
     r"次日不连板",
     r"次日不涨停",
@@ -60,9 +77,9 @@ _SEMANTIC_RULES = [
     r"打板",
     r"格局",
     r"二波",
-    r"网格策略",
-    r"底仓",
-    r"定投",
+    r"(?<![无非同])网格策略",
+    r"(?<![无非同])底仓",
+    r"(?<![无非同])定投",
     r"冰点",
     r"潜伏",
 ]
@@ -75,21 +92,24 @@ class TradeNoteParseResult(TypedDict):
     loss_patterns: list[str]
     win_patterns: list[str]
     semantic_rules: list[str]
+    grid_step_pct: float | None  # v2.7: 网格步长百分比
 
 
 def parse_trade_note(text: str | None) -> TradeNoteParseResult:
-    """从 trade_note 文本里提取可执行的价格数字。
+    """从 trade_note 文本里提取可执行的价格数字 + 网格步长（v2.7）。
 
     不会 raise，所有异常都返回空结果。
     """
+    empty: TradeNoteParseResult = {
+        "target_loss": None,
+        "target_win": None,
+        "loss_patterns": [],
+        "win_patterns": [],
+        "semantic_rules": [],
+        "grid_step_pct": None,
+    }
     if not text or not text.strip():
-        return {
-            "target_loss": None,
-            "target_win": None,
-            "loss_patterns": [],
-            "win_patterns": [],
-            "semantic_rules": [],
-        }
+        return empty
 
     text = text.strip()
 
@@ -101,7 +121,6 @@ def parse_trade_note(text: str | None) -> TradeNoteParseResult:
     target_loss: float | None = None
     if loss_matches:
         try:
-            # 取第一个匹配（最相关），并用 float 转换
             v = float(loss_matches[0])
             if 0.01 <= v <= 9999.99:
                 target_loss = v
@@ -119,8 +138,22 @@ def parse_trade_note(text: str | None) -> TradeNoteParseResult:
         except (ValueError, TypeError):
             target_win = None
 
-    # 纯语义规则（标记"这条 trade_note 是有纪律的"，但无法提取数字）
+    # 纯语义规则
     semantic_hits = _SEMANTIC_RE.findall(text)
+
+    # v2.7 网格步长：先尝试主模式「每X%」，再尝试兜底「步长 X%」
+    grid_step_pct: float | None = None
+    m = _GRID_STEP_RE.search(text)
+    if not m:
+        m = _GRID_STEP_FALLBACK_RE.search(text)
+    if m:
+        try:
+            v = float(m.group(1))
+            # 网格步长合理范围 0.1% ~ 50%
+            if 0.1 <= v <= 50.0:
+                grid_step_pct = v
+        except (ValueError, TypeError):
+            grid_step_pct = None
 
     return {
         "target_loss": target_loss,
@@ -128,6 +161,7 @@ def parse_trade_note(text: str | None) -> TradeNoteParseResult:
         "loss_patterns": [m for m in loss_matches],
         "win_patterns": [m for m in win_matches],
         "semantic_rules": semantic_hits,
+        "grid_step_pct": grid_step_pct,
     }
 
 
@@ -141,8 +175,14 @@ if __name__ == "__main__":
         "白酒龙头博弈反弹。核心纪律：跌破1620无条件清仓止损，绝不格局！",
         "放量突破 18.50 加仓",
         "破位 1620 杀跌到 1580 止损",
+        # v2.7 网格步长专项测试
+        "网格策略。每跌3%加仓一手。",
+        "网格步长 7%，每跌 X% 加仓",
+        "网格 5% 步长 ETF",
+        "无网格策略的笔记",
     ]
     for s in samples:
         r = parse_trade_note(s)
         print(f"\n笔记: {s[:50]}...")
-        print(f"  → 止盈 {r['target_win']}, 止损 {r['target_loss']}, 语义规则 {r['semantic_rules']}")
+        print(f"  → 止盈 {r['target_win']}, 止损 {r['target_loss']}, "
+              f"网格步长 {r['grid_step_pct']}%, 语义 {r['semantic_rules']}")

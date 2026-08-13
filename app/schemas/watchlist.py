@@ -52,6 +52,15 @@ class WatchlistBase(BaseModel):
         default=None, ge=0, description="止损/防守价（元/股），触发后弹通知"
     )
 
+    # ===== v2.7 网格动态追踪 =====
+    # 上次网格加/减仓的基准价。
+    # 算法：grid_distance = (现价 - last_grid_price) / last_grid_price * 100
+    # 留空时 fallback 用 cost_price 作为初始基准
+    last_grid_price: float | None = Field(
+        default=None, ge=0,
+        description="上次网格加/减仓基准价；空时 fallback 用 cost_price",
+    )
+
     @field_validator("ts_code", mode="before")
     @classmethod
     def _check_ts_code(cls, v) -> str:
@@ -123,6 +132,8 @@ class WatchlistUpdate(BaseModel):
     # v1.2: 止盈止损
     target_win: float | None = Field(default=None, ge=0)
     target_loss: float | None = Field(default=None, ge=0)
+    # v2.7: 网格基准价
+    last_grid_price: float | None = Field(default=None, ge=0)
 
     @field_validator("exchange")
     @classmethod

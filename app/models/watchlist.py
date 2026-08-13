@@ -44,6 +44,14 @@ class Watchlist(Base):
     # 止损/防守价（元/股）：现价 <= target_loss 触发 is_stop_loss 信号
     target_loss: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
 
+    # ===== v2.7 网格动态追踪（增量）=====
+    # 上次网格加/减仓的基准价（元/股）。
+    # 算法：grid_distance = (现价 - last_grid_price) / last_grid_price * 100
+    #       如果 grid_distance <= -grid_step_pct → 触发 is_grid_buy（加仓机会）
+    #       如果 grid_distance >=  grid_step_pct → 触发 is_grid_sell（减仓机会）
+    # 空值时 fallback 使用 cost_price（首次建仓还没建网格交易也能算）
+    last_grid_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )
