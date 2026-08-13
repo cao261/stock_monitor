@@ -36,6 +36,7 @@ _verify*.py
 _check_*.py
 _test_*.py
 _test_*.js
+_diag_*.py
 _dbg_*.py
 _find_*.py
 _list.py

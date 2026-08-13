@@ -111,6 +111,9 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
             "trade_note": w.trade_note or "",
             "target_win": w.target_win,
             "target_loss": w.target_loss,
+            # v4.0: 理想建仓区间（指令 10 前瞻机会扫描用）
+            "entry_price_min": w.entry_price_min,
+            "entry_price_max": w.entry_price_max,
             # v2.6: trade_note 智能解析结果
             #   - note_extracted_target_win / note_extracted_target_loss: 从笔记里挖出的价
             #   - eff_target_win / eff_target_loss: 实际生效的止盈/止损（用户值优先，笔记值兜底）

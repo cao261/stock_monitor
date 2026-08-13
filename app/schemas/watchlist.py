@@ -61,6 +61,17 @@ class WatchlistBase(BaseModel):
         description="上次网格加/减仓基准价；空时 fallback 用 cost_price",
     )
 
+    # ===== v4.0 理想建仓区间（领航员前瞻提示）=====
+    # 用户手动设 / AI 智能规划都会写这俩字段。
+    # 空仓时 + 现价落入 [min, max] 区间内 → 触发 is_entry_opportunity 信号
+    # 前端金色高亮 + 桌面弹窗（每日每只股票最多 1 次）
+    entry_price_min: float | None = Field(
+        default=None, ge=0, description="理想建仓下限（元/股），空仓触发建仓信号的下沿"
+    )
+    entry_price_max: float | None = Field(
+        default=None, ge=0, description="理想建仓上限（元/股），空仓触发建仓信号的上沿"
+    )
+
     @field_validator("ts_code", mode="before")
     @classmethod
     def _check_ts_code(cls, v) -> str:
@@ -134,6 +145,9 @@ class WatchlistUpdate(BaseModel):
     target_loss: float | None = Field(default=None, ge=0)
     # v2.7: 网格基准价
     last_grid_price: float | None = Field(default=None, ge=0)
+    # v4.0: 理想建仓区间
+    entry_price_min: float | None = Field(default=None, ge=0)
+    entry_price_max: float | None = Field(default=None, ge=0)
 
     @field_validator("exchange")
     @classmethod

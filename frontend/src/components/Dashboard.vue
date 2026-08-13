@@ -2,6 +2,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import {
   addToWatchlist,
+  aiPlan,  // v4.0 AI 智能规划（教 LLM 看 K 线，输出建仓计划）
   getAiReport,
   getDailySummary,
   getFundFlow,
@@ -82,6 +83,14 @@ const SUMMARY_AUTO_TRIGGER_HOUR = 15  // 15:00 收盘
 const ledgerModal = ref(false)
 const ledgerData = ref({ trades: [], total_count: 0, total_realized_pnl: 0 })
 const ledgerLoading = ref(false)
+
+// v4.0 AI 智能规划 —— 弹确认 Modal 的状态
+// aiPlanDialog 结构：{ open, w, result, loading }
+//   - w:      触发规划的 watchlist 行（用来 PATCH 写库时拿 id / name）
+//   - result: 接口返回的 { plan, existing, explain, model }，前端 Modal 显示用
+//   - loading: 接口调用的 loading（按钮 spinner）
+const aiPlanDialog = ref({ open: false, w: null, result: null, loading: false })
+const aiPlanSaving = ref(false)  // 用户点确认后 PATCH 的 saving 状态
 const SUMMARY_CHECK_INTERVAL_MS = 60_000  // 1 分钟检查一次
 
 // ====================== v2.4: 轻量级 Markdown 渲染 ======================
@@ -272,7 +281,20 @@ function buildStrategyAdvice(w) {
   // 全部被后端禁掉，前端不再做"幽灵告警"渲染
   const isEmpty = (w.position == null) || (Number(w.position) <= 0)
 
-  // v2.7 网格动态追踪 —— 最高优先级（用户明确"按纪律加/减仓"是动作意图）
+  // ===== v4.0: 建仓机会（空仓 + 现价落入理想区间）—— 最高优先级 =====
+  // 比网格买入还高——用户画了"前瞻建仓甜区"，现价真到了，机会大于一切
+  // 只在空仓时触发（持仓了还喊"建仓"会让人困惑）
+  if (isEmpty && w.is_entry_opportunity
+      && w.entry_price_min != null && w.entry_price_max != null) {
+    return {
+      level: 'entry-opportunity',
+      icon: '🎯',
+      text: `到达理想建仓区间 (${fmtPrice(w.entry_price_min)} - ${fmtPrice(w.entry_price_max)})！`,
+      title: `领航员提示：现价 ${fmtPrice(price)} 落在你画的 [${fmtPrice(w.entry_price_min)}, ${fmtPrice(w.entry_price_max)}] 区间内，可考虑分批建仓`,
+    }
+  }
+
+  // v2.7 网格动态追踪 —— 次高优先级（用户明确"按纪律加/减仓"是动作意图）
   // 注意：网格买入覆盖"浮亏中盯止损"——网格用户希望越跌越买，不希望被误劝离场
   // v3.1: 空仓时 is_grid_sell 已被后端禁掉，这里 is_grid_sell 永远不会触发（防御性）
   if (w.is_grid_buy) {
@@ -508,6 +530,12 @@ async function refresh() {
     }
     prevSignalCodes = newCodes
     signals.value = signalsList
+
+    // v4.0: 建仓机会桌面弹窗去重（每只股票每天最多 1 次）
+    for (const w0 of watchlist.value) {
+      if (w0.is_entry_opportunity) notifyEntryOpportunity(w0)
+    }
+
     lastUpdated.value = Date.now()
   } catch (e) {
     error.value = e.message
@@ -984,6 +1012,79 @@ async function requestNotifyPermission() {
   if (Notification.permission === 'default') {
     try { await Notification.requestPermission() } catch (_) {}
   }
+}
+
+// ====================== v4.0: AI 智能规划 + 建仓通知 ======================
+async function handleAiPlan(w) {
+  // 弹 Modal（loading 状态）
+  aiPlanDialog.value = { open: true, w, result: null, loading: true }
+  // 申请桌面通知权限（领航员会用到，但不强求用户授权）
+  if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+    try { await Notification.requestPermission() } catch (_) {}
+  }
+  try {
+    const r = await aiPlan(w.id)
+    aiPlanDialog.value.result = r.data
+  } catch (e) {
+    // 关掉 Modal，用 Toast 显示错误（不让用户卡在 loading 模态框里）
+    aiPlanDialog.value = { open: false, w: null, result: null, loading: false }
+    showToast({ level: 'error', text: 'AI 智能规划失败', subtext: e?.message || '未知错误' })
+    return
+  } finally {
+    aiPlanDialog.value.loading = false
+  }
+}
+
+async function confirmAiPlan() {
+  if (!aiPlanDialog.value.w || !aiPlanDialog.value.result) return
+  const w = aiPlanDialog.value.w
+  const plan = aiPlanDialog.value.result.plan
+  if (!plan) return
+  aiPlanSaving.value = true
+  try {
+    // 一次 PATCH 写所有字段
+    await updateWatchlist(w.id, {
+      entry_price_min: plan.entry_price_min,
+      entry_price_max: plan.entry_price_max,
+      target_win: plan.target_win,
+      target_loss: plan.target_loss,
+      trade_note: plan.trade_note,
+    })
+    await refresh()
+    showToast({
+      level: 'info',
+      text: 'AI 智能规划已应用',
+      subtext: `建仓区间 ${plan.entry_price_min} - ${plan.entry_price_max} · 模型 ${aiPlanDialog.value.result.model}`,
+    })
+    dismissAiPlan()
+  } catch (e) {
+    showToast({ level: 'error', text: '保存失败', subtext: e?.message || '未知错误' })
+  } finally {
+    aiPlanSaving.value = false
+  }
+}
+
+function dismissAiPlan() {
+  aiPlanDialog.value = { open: false, w: null, result: null, loading: false }
+}
+
+// 建仓机会桌面弹窗（v4.0 决策：每只股票每天最多 1 次，localStorage 去重）
+function notifyEntryOpportunity(w) {
+  if (!w || !w.is_entry_opportunity) return
+  if (!w.entry_price_min || !w.entry_price_max) return
+  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
+  const key = `notify_entry_v4_${w.ts_code}_${new Date().toISOString().slice(0, 10)}`
+  try {
+    if (localStorage.getItem(key)) return  // 今天已弹过
+    localStorage.setItem(key, '1')
+  } catch (_) {
+    // localStorage 不可用时降级为不弹（避免抛错）
+    return
+  }
+  try {
+    const body = `现价 ${fmtPrice(w.price)} 落入理想建仓区间 [${fmtPrice(w.entry_price_min)}, ${fmtPrice(w.entry_price_max)}]，可考虑分批建仓`
+    new Notification(`🎯 ${w.name || w.ts_code} · 到达建仓区间`, { body, tag: key })
+  } catch (_) { /* 浏览器拒绝就静默 */ }
 }
 
 // ====================== v2.3: 复盘战报 ======================
@@ -1773,6 +1874,8 @@ onUnmounted(() => {
                         // v2.7 网格信号
                         'text-fuchsia-300 font-semibold animate-pulse': buildStrategyAdvice(w).level === 'grid-buy',
                         'text-emerald-300 font-semibold animate-pulse':  buildStrategyAdvice(w).level === 'grid-sell',
+                        // v4.0 建仓机会 —— 最高优先级，金色 + 强发光
+                        'text-amber-300 font-bold animate-pulse [text-shadow:0_0_8px_rgba(252,211,77,0.6)]': buildStrategyAdvice(w).level === 'entry-opportunity',
                       }"
                       :title="buildStrategyAdvice(w).title || '建议生成逻辑：基于 trade_note 提取的止盈/止损位 + 当前价/收益率实时计算'"
                     >
@@ -1786,6 +1889,14 @@ onUnmounted(() => {
               <td class="py-3 px-4">
                 <div class="flex flex-wrap gap-1">
                   <!-- v1.2: 止盈 / 止损优先显示，pulse 动画 -->
+                  <!-- v4.0: 到达建仓区间徽章（最高优先级） -->
+                  <span
+                    v-if="w.is_entry_opportunity && w.entry_price_min != null && w.entry_price_max != null"
+                    class="badge badge-entry"
+                    :title="`领航员提示：现价 ${fmtPrice(w.price)} 落入理想建仓区间 [${fmtPrice(w.entry_price_min)}, ${fmtPrice(w.entry_price_max)}]`"
+                  >
+                    🎯 到达建仓区间
+                  </span>
                   <span
                     v-if="w.signal?.signals?.is_take_profit"
                     class="badge badge-win"
@@ -1816,6 +1927,18 @@ onUnmounted(() => {
                 </div>
               </td>
               <td class="py-3 px-4 text-right whitespace-nowrap">
+                <button
+                  v-if="(w.position == null) || (Number(w.position) <= 0)"
+                  @click="handleAiPlan(w)"
+                  :disabled="aiPlanDialog.loading && aiPlanDialog.w?.id === w.id"
+                  class="text-amber-300 hover:text-amber-200 text-xs mr-3 transition font-medium
+                         [text-shadow:0_0_6px_rgba(252,211,77,0.4)]"
+                  title="v4.0 领航员：让 LLM 看 60 天 K 线 + 当前形态，自动规划理想建仓区间"
+                >
+                  <span v-if="aiPlanDialog.loading && aiPlanDialog.w?.id === w.id">⏳</span>
+                  <span v-else>✨</span>
+                  AI 规划
+                </button>
                 <button
                   @click="openChart(w.ts_code, w.name || w.name_from_market, w.cost_price, w.target_win, w.target_loss)"
                   class="text-sky-400 hover:text-sky-300 text-xs mr-3 transition font-medium"
@@ -1872,6 +1995,24 @@ onUnmounted(() => {
             <span class="text-xs text-slate-200 truncate group-hover:text-sky-300 transition">
               {{ r.name || r.code }}
             </span>
+            <!-- v4.0: 技术利多 / 放量突破 徽章（基于 watchlist 的量比 + 涨幅） -->
+            <span
+              v-if="(() => {
+                const w = watchlist.find(x => x.ts_code === r.code)
+                return w && w.volume_ratio != null && w.volume_ratio > 1.5 && r.change_pct > 3
+              })()"
+              class="text-[9px] px-1.5 py-0.5 rounded font-semibold
+                     bg-amber-500/30 text-amber-200 border border-amber-400/60
+                     shadow-[0_0_8px_rgba(252,211,77,0.4)] animate-pulse whitespace-nowrap"
+              title="领航员标记：量比 > 1.5 且涨幅 > 3%，技术利多"
+            >技术利多</span>
+            <span
+              v-else-if="r.change_pct > 5"
+              class="text-[9px] px-1.5 py-0.5 rounded font-semibold
+                     bg-rose-500/25 text-rose-200 border border-rose-400/50
+                     whitespace-nowrap"
+              title="涨幅 > 5%，放量突破"
+            >放量突破</span>
           </div>
           <div class="flex items-baseline justify-between mt-0.5">
             <span class="font-mono text-[11px] text-slate-500 tabular-nums">
@@ -2697,6 +2838,8 @@ onUnmounted(() => {
               'bg-slate-900/95 border-slate-500/60 before:bg-gradient-to-br before:from-slate-500/40 before:to-slate-400/20': toast.level === 'sell-flat',
               'bg-sky-950/95 border-sky-400/60 before:bg-gradient-to-br before:from-sky-500/50 before:to-sky-300/30': toast.level === 'buy',
               'bg-emerald-950/95 border-emerald-400/60 before:bg-gradient-to-br before:from-emerald-500/50 before:to-emerald-300/30': toast.level === 'info',
+              // v4.0: 建仓机会 —— 金色（amber-400），与 Toast 主色错开避免和 sell-win 混淆
+              'bg-amber-950/95 border-amber-400/60 before:bg-gradient-to-br before:from-amber-500/50 before:to-amber-300/30': toast.level === 'entry-opportunity',
             }"
           >
             <div class="flex items-start gap-3">
@@ -2706,6 +2849,7 @@ onUnmounted(() => {
                 <span v-else-if="toast.level === 'sell-flat'">🤝</span>
                 <span v-else-if="toast.level === 'buy'">📥</span>
                 <span v-else-if="toast.level === 'info'">✅</span>
+                <span v-else-if="toast.level === 'entry-opportunity'">🎯</span>
                 <span v-else>⚠️</span>
               </div>
               <div class="flex-1 min-w-0">
@@ -2716,6 +2860,7 @@ onUnmounted(() => {
                     'text-rose-200': toast.level === 'sell-loss' || toast.level === 'error',
                     'text-slate-200': toast.level === 'sell-flat',
                     'text-sky-200': toast.level === 'buy',
+                    'text-amber-200': toast.level === 'entry-opportunity',
                   }"
                 >{{ toast.text }}</div>
                 <div v-if="toast.subtext" class="text-xs mt-0.5 font-mono"
@@ -2724,6 +2869,7 @@ onUnmounted(() => {
                     'text-rose-300/90': toast.level === 'sell-loss' || toast.level === 'error',
                     'text-slate-300/90': toast.level === 'sell-flat',
                     'text-sky-300/90': toast.level === 'buy',
+                    'text-amber-300/90': toast.level === 'entry-opportunity',
                   }"
                 >{{ toast.subtext }}</div>
               </div>
@@ -2736,6 +2882,188 @@ onUnmounted(() => {
           </div>
         </div>
       </Transition>
+    </Teleport>
+
+    <!-- ====================== v4.0 AI 智能规划确认 Modal ====================== -->
+    <Teleport to="body">
+      <div
+        v-if="aiPlanDialog.open"
+        class="fixed inset-0 z-[65] flex items-center justify-center p-4
+               bg-black/70 backdrop-blur-md"
+        @click.self="dismissAiPlan"
+      >
+        <div
+          class="relative bg-slate-900/90 backdrop-blur-md rounded-xl
+                 border border-amber-400/40 shadow-2xl
+                 w-full max-w-2xl max-h-[88vh] overflow-y-auto
+                 before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                 before:bg-gradient-to-br before:from-amber-500/40 before:via-purple-500/20 before:to-sky-500/40
+                 before:-z-10 before:pointer-events-none"
+        >
+          <!-- 顶部条 -->
+          <div class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur
+                      flex items-center justify-between px-6 py-4
+                      border-b border-amber-400/30 rounded-t-xl">
+            <div>
+              <h3 class="text-xl font-semibold text-amber-200 flex items-center gap-2">
+                ✨ AI 智能规划
+                <span class="text-xs font-normal text-slate-500 font-mono">
+                  {{ aiPlanDialog.result?.model ? '· ' + aiPlanDialog.result.model : '' }}
+                </span>
+              </h3>
+              <p class="text-xs text-slate-500 mt-1 font-mono">
+                {{ aiPlanDialog.w?.name || aiPlanDialog.w?.ts_code || '' }}
+                <span v-if="aiPlanDialog.result?.current_price != null">
+                  · 当前价 {{ fmtPrice(aiPlanDialog.result.current_price) }}
+                </span>
+              </p>
+            </div>
+            <button
+              @click="dismissAiPlan"
+              class="text-slate-500 hover:text-slate-200 text-2xl leading-none w-8 h-8 flex items-center justify-center"
+              title="关闭"
+            >×</button>
+          </div>
+
+          <!-- 加载中 -->
+          <div v-if="aiPlanDialog.loading" class="px-6 py-16 text-center">
+            <div class="text-5xl mb-4 animate-pulse">✨</div>
+            <p class="text-amber-200 text-base mb-2">领航员正在看 K 线…</p>
+            <p class="text-slate-500 text-xs">通常需要 5-15 秒（模型冷启动）</p>
+          </div>
+
+          <!-- 已加载：展示计划 -->
+          <div v-else-if="aiPlanDialog.result" class="p-6 space-y-5">
+            <!-- 已有值对比（覆盖提示） -->
+            <div
+              v-if="aiPlanDialog.result.existing?.entry_price_min != null || aiPlanDialog.result.existing?.entry_price_max != null || aiPlanDialog.result.existing?.trade_note"
+              class="rounded-lg p-3 bg-amber-500/10 border border-amber-400/30 text-xs"
+            >
+              <p class="text-amber-200 font-semibold mb-1">⚠️ 已有值将被覆盖</p>
+              <p class="text-slate-400">
+                当前建仓区间：
+                <span class="text-slate-200 font-mono">
+                  {{ aiPlanDialog.result.existing.entry_price_min ?? '—' }}
+                  ~
+                  {{ aiPlanDialog.result.existing.entry_price_max ?? '—' }}
+                </span>
+                <span v-if="aiPlanDialog.result.existing.trade_note" class="ml-2">
+                  · 备注: <span class="text-slate-200">{{ aiPlanDialog.result.existing.trade_note }}</span>
+                </span>
+              </p>
+            </div>
+
+            <!-- 计划内容 -->
+            <div class="grid grid-cols-2 gap-3 text-sm">
+              <div class="rounded-lg p-3 bg-amber-500/10 border border-amber-400/30">
+                <p class="text-amber-300 text-xs mb-1">建仓下限</p>
+                <p class="text-2xl font-mono font-bold text-amber-200">
+                  {{ aiPlanDialog.result.plan.entry_price_min }}
+                </p>
+              </div>
+              <div class="rounded-lg p-3 bg-amber-500/10 border border-amber-400/30">
+                <p class="text-amber-300 text-xs mb-1">建仓上限</p>
+                <p class="text-2xl font-mono font-bold text-amber-200">
+                  {{ aiPlanDialog.result.plan.entry_price_max }}
+                </p>
+              </div>
+              <div class="rounded-lg p-3 bg-emerald-500/10 border border-emerald-400/30">
+                <p class="text-emerald-300 text-xs mb-1">建议止盈</p>
+                <p class="text-2xl font-mono font-bold text-emerald-200">
+                  {{ aiPlanDialog.result.plan.target_win ?? '—' }}
+                </p>
+              </div>
+              <div class="rounded-lg p-3 bg-rose-500/10 border border-rose-400/30">
+                <p class="text-rose-300 text-xs mb-1">建议止损</p>
+                <p class="text-2xl font-mono font-bold text-rose-200">
+                  {{ aiPlanDialog.result.plan.target_loss ?? '—' }}
+                </p>
+              </div>
+            </div>
+
+            <!-- 策略简述 -->
+            <div>
+              <p class="text-xs text-slate-400 mb-1">📝 建仓策略</p>
+              <p class="text-sm text-slate-200 leading-relaxed">
+                {{ aiPlanDialog.result.plan.trade_note || '（无）' }}
+              </p>
+            </div>
+
+            <!-- 决策依据 -->
+            <div v-if="aiPlanDialog.result.plan.rationale">
+              <p class="text-xs text-slate-400 mb-1">🧭 决策依据</p>
+              <p class="text-sm text-slate-300 leading-relaxed italic">
+                {{ aiPlanDialog.result.plan.rationale }}
+              </p>
+            </div>
+
+            <!-- 技术标签 -->
+            <div v-if="aiPlanDialog.result.plan.tags?.length">
+              <p class="text-xs text-slate-400 mb-1">🏷️ 技术标签</p>
+              <div class="flex flex-wrap gap-1.5">
+                <span
+                  v-for="t in aiPlanDialog.result.plan.tags"
+                  :key="t"
+                  class="text-xs px-2 py-0.5 rounded
+                         bg-amber-500/20 text-amber-200 border border-amber-400/40"
+                >{{ t }}</span>
+              </div>
+            </div>
+
+            <!-- 关键特征 -->
+            <div v-if="aiPlanDialog.result.explain?.features" class="border-t border-slate-700/40 pt-3">
+              <p class="text-xs text-slate-400 mb-2">📊 关键特征（K 线摘要）</p>
+              <div class="grid grid-cols-3 gap-2 text-xs font-mono">
+                <div v-for="(v, k) in {
+                  'MA5':  aiPlanDialog.result.explain.features.ma5,
+                  'MA10': aiPlanDialog.result.explain.features.ma10,
+                  'MA20': aiPlanDialog.result.explain.features.ma20,
+                  'MA60': aiPlanDialog.result.explain.features.ma60,
+                  'ATR14': aiPlanDialog.result.explain.features.atr14,
+                  '趋势': aiPlanDialog.result.explain.features.trend,
+                  '量能': aiPlanDialog.result.explain.features.volume_trend,
+                  '连阳': aiPlanDialog.result.explain.features.consecutive_up_days,
+                  '连阴': aiPlanDialog.result.explain.features.consecutive_down_days,
+                }" :key="k"
+                  class="rounded bg-slate-800/60 px-2 py-1 text-slate-300">
+                  <span class="text-slate-500">{{ k }}</span>
+                  <span class="ml-2">{{ v ?? '—' }}{{ typeof v === 'number' ? '' : '' }}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 底部按钮 -->
+          <div class="sticky bottom-0 z-10 bg-slate-900/95 backdrop-blur
+                      flex items-center justify-end gap-3 px-6 py-4
+                      border-t border-slate-700/40 rounded-b-xl">
+            <button
+              @click="dismissAiPlan"
+              class="px-4 py-2 text-sm rounded
+                     bg-slate-700/50 text-slate-300
+                     hover:bg-slate-700/80 transition"
+            >取消</button>
+            <button
+              v-if="aiPlanDialog.result"
+              @click="confirmAiPlan"
+              :disabled="aiPlanSaving"
+              class="px-5 py-2 text-sm font-medium rounded
+                     bg-gradient-to-r from-amber-500/30 via-amber-500/20 to-amber-500/30
+                     border border-amber-400/60 text-amber-100
+                     hover:from-amber-500/40 hover:via-amber-500/30 hover:to-amber-500/40
+                     hover:border-amber-400/80
+                     transition shadow-[0_0_20px_rgba(252,211,77,0.25)]
+                     hover:shadow-[0_0_28px_rgba(252,211,77,0.4)]
+                     disabled:opacity-50 disabled:cursor-not-allowed
+                     flex items-center gap-2"
+            >
+              <span v-if="aiPlanSaving">⏳</span>
+              <span v-else>✨</span>
+              {{ aiPlanSaving ? '保存中…' : '应用 AI 建议' }}
+            </button>
+          </div>
+        </div>
+      </div>
     </Teleport>
   </div>
 </template>

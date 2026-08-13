@@ -52,6 +52,14 @@ class Watchlist(Base):
     # 空值时 fallback 使用 cost_price（首次建仓还没建网格交易也能算）
     last_grid_price: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
 
+    # ===== v4.0 理想建仓区间（领航员前瞻提示用）=====
+    # 含义：用户（或 AI 智能规划）给空仓股画的「未来建仓甜区」
+    #   - 空仓 + 现价落入 [min, max] 区间内 → 触发 is_entry_opportunity 信号
+    #   - 前端展示金色高亮 + 桌面弹窗（每天每只股票最多 1 次，去重）
+    #   - 用户可手动设，也可由 POST /api/watchlist/{id}/ai-plan 自动规划
+    entry_price_min: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    entry_price_max: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, server_default=func.now()
     )

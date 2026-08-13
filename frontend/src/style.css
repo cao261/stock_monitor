@@ -132,6 +132,19 @@ table,
   box-shadow: 0 0 14px rgba(239, 68, 68, 0.55);
   animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
+
+/* v4.0 领航员建仓机会 badge —— 金色 + 强发光 + 1s 脉冲 */
+.badge-entry {
+  background: linear-gradient(
+    90deg,
+    rgba(252, 211, 77, 0.32) 0%,
+    rgba(245, 158, 11, 0.32) 100%
+  );
+  color: #fef3c7;
+  border: 1px solid rgba(252, 211, 77, 0.85);
+  box-shadow: 0 0 16px rgba(252, 211, 77, 0.55);
+  animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.65; }

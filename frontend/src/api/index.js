@@ -185,4 +185,27 @@ export function getTradeHistory(params = {}) {
   return api.get('/trades/history', { params })
 }
 
+/**
+ * v4.0 AI 智能规划（领航员看 K 线，输出建仓计划）
+ * POST /watchlist/{id}/ai-plan
+ *
+ * **关键设计**：本接口**不直接写库**。返回的 plan 由前端弹 Modal 让用户确认后，
+ * 走 updateWatchlist(id, {entry_price_min, entry_price_max, target_win, target_loss, trade_note}) 写库。
+ *
+ * @param {number} id - watchlist 主键
+ * @returns {Promise<AxiosResponse<{
+ *   stock_id, ts_code, name, current_price,
+ *   existing: { entry_price_min, entry_price_max, target_win, target_loss, trade_note },
+ *   plan: {
+ *     entry_price_min, entry_price_max, target_win, target_loss,
+ *     trade_note, rationale, tags: string[]
+ *   },
+ *   explain: { features: {...}, ohlcv_10d: [{date, open, close, high, low, volume_lots}, ...] },
+ *   model: string
+ * }>>}
+ */
+export function aiPlan(id) {
+  return api.post(`/watchlist/${id}/ai-plan`)
+}
+
 export default api

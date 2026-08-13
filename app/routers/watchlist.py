@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import analyzer
 import market_fetcher as mf
+from app import config  # v4.0 AI 智能规划需要读 LLM 配置
 from app.crud.watchlist import watchlist as crud
 from app.database import get_db
 from app.models.trade_log import TradeLog
@@ -20,6 +21,7 @@ from app.schemas.watchlist import (
     WatchlistUpdate,
 )
 from app.schemas.watchlist_quote import WatchlistQuote
+from app.services import llm  # v4.0 AI 智能规划
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 trade_logger = logging.getLogger("trade")
@@ -146,6 +148,27 @@ async def list_watchlist_quotes(
             position=item.position,
         )
 
+        # ===== v4.0: 引擎派生 is_entry_opportunity（用于 /quotes 接口）=====
+        # /signals 接口也会算，这里再算一次是为了让 /quotes 响应也带回这个字段
+        # （前端表格用 /quotes 渲染，实时判断空仓 + 区间内 即给金色高亮）
+        if quote is not None:
+            _entry_sig = analyzer.check_signals(
+                item.ts_code,
+                quote,
+                mf.get_history(item.ts_code),
+                target_win=eff_target_win,
+                target_loss=eff_target_loss,
+                position=item.position,
+                entry_price_min=item.entry_price_min,
+                entry_price_max=item.entry_price_max,
+            )
+            is_entry_opportunity = bool(
+                (_entry_sig.get("signals") or {}).get("is_entry_opportunity", False)
+            )
+        else:
+            # cache miss：没现价就一定不触发
+            is_entry_opportunity = False
+
         if quote is None:
             result.append(
                 WatchlistQuote(
@@ -180,6 +203,10 @@ async def list_watchlist_quotes(
                     grid_distance=grid_sig["grid_distance"],
                     is_grid_buy=grid_sig["is_grid_buy"],
                     is_grid_sell=grid_sig["is_grid_sell"],
+                    # v4.0
+                    entry_price_min=item.entry_price_min,
+                    entry_price_max=item.entry_price_max,
+                    is_entry_opportunity=False,  # cache miss 时一定不触发
                 )
             )
             continue
@@ -228,6 +255,10 @@ async def list_watchlist_quotes(
                 grid_distance=grid_sig["grid_distance"],
                 is_grid_buy=grid_sig["is_grid_buy"],
                 is_grid_sell=grid_sig["is_grid_sell"],
+                # v4.0
+                entry_price_min=item.entry_price_min,
+                entry_price_max=item.entry_price_max,
+                is_entry_opportunity=is_entry_opportunity,
             )
         )
     return result
@@ -280,6 +311,9 @@ def list_watchlist_signals(
             target_win=_eff_tw,
             target_loss=_eff_tl,
             position=item.position,
+            # v4.0: 把理想建仓区间也喂给信号引擎
+            entry_price_min=item.entry_price_min,
+            entry_price_max=item.entry_price_max,
         )
         triggered = (
             sig["signals"]["is_volume_breakout"]
@@ -493,3 +527,112 @@ def execute_trade(
         new_cost_price=float(obj.cost_price),
         new_last_grid_price=float(obj.last_grid_price),
     )
+
+
+# ====================== v4.0 AI 智能规划接口 ======================
+@router.post(
+    "/{stock_id}/ai-plan",
+    summary="v4.0 AI 智能规划（教 LLM 看 K 线，输出建仓计划，前端弹确认 Modal）",
+)
+async def ai_plan(
+    stock_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """读取该股票最近 60 天的 K 线数据，提取技术特征 + 最近 10 天原始 OHLCV，
+    喂给 LLM 拿 JSON 建仓计划。
+
+    **关键设计**：本接口**不直接写库**，而是把 LLM 的建议连同"当前已设值"打包回前端，
+    让用户在前端 Modal 里确认后再走 PATCH /watchlist/{id} 写库。
+
+    错误处理：
+      - 404: stock_id 不存在
+      - 400: K 线数据缺失（用户没在 watchlist 几秒内触发 fetcher 拉过历史）
+      - 503: LLM 未配置
+      - 502: LLM 调用失败 / JSON 解析失败
+    """
+    if not config.LLM_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "LLM 未启用。请在项目根目录的 .env 里设置 LLM_API_KEY"
+                "（参考 .env.example）。"
+            ),
+        )
+
+    obj = crud.get(db, stock_id)
+    if not obj:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"自选股 id={stock_id} 不存在",
+        )
+
+    # ===== 1. 拿 K 线 + 当前行情 =====
+    history = mf.get_history(obj.ts_code) or {}
+    history_data = history.get("data") or []
+    if not history_data or len(history_data) < 5:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"K 线数据不足（仅 {len(history_data)} 条），无法做技术分析。"
+                "请等待 5 秒后系统自动拉取历史，或手动调 POST /api/market/history/refresh 触发。"
+            ),
+        )
+
+    quote = mf.get_stock(obj.ts_code) or {}
+    current_price = quote.get("price") or quote.get("close")
+
+    # ===== 2. 提取技术特征 + 最近 10 天 OHLCV =====
+    features, ohlcv_10d = analyzer.build_ai_plan_payload(
+        ts_code=obj.ts_code,
+        history_data=history_data,
+        current_price=current_price,
+        ohlcv_days=10,
+    )
+
+    # ===== 3. 调 LLM 拿 JSON 计划 =====
+    try:
+        plan = await llm.generate_ai_plan(
+            ts_code=obj.ts_code,
+            name=obj.name or "",
+            current_price=current_price,
+            features=features,
+            ohlcv_10d=ohlcv_10d,
+        )
+    except ValueError as e:
+        # LLM 输出 JSON 缺关键字段
+        trade_logger.exception("ai-plan JSON parse failed for %s", obj.ts_code)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI 规划解析失败：{e}",
+        ) from e
+    except Exception as e:
+        # 网络 / 限流 / 余额不足
+        trade_logger.exception("ai-plan LLM call failed for %s", obj.ts_code)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI 规划调用失败：{e}",
+        ) from e
+
+    # ===== 4. 把"当前已设值"也带上，前端 Modal 能做覆盖提示 =====
+    return {
+        "stock_id": obj.id,
+        "ts_code": obj.ts_code,
+        "name": obj.name or "",
+        "current_price": current_price,
+        # v4.0 引擎会拿这俩字段做 is_entry_opportunity
+        "existing": {
+            "entry_price_min": obj.entry_price_min,
+            "entry_price_max": obj.entry_price_max,
+            "target_win": obj.target_win,
+            "target_loss": obj.target_loss,
+            "trade_note": obj.trade_note,
+        },
+        # AI 给的建议（前端 Modal 显示给用户看）
+        "plan": plan,
+        # 给前端做"可解释性"展示用（不写库）
+        "explain": {
+            "features": features,
+            "ohlcv_10d": ohlcv_10d,
+        },
+        "model": config.LLM_MODEL_NAME,
+    }

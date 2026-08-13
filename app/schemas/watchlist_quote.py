@@ -101,4 +101,20 @@ class WatchlistQuote(BaseModel):
         False, description="突破网格步长：触发卖出减仓"
     )
 
+    # ===== v4.0 理想建仓区间（领航员前瞻提示）=====
+    # 用户手动设 / AI 智能规划 都会写这俩字段。空仓时由 analyzer.check_signals
+    # 结合当前价算出 is_entry_opportunity（现价落入 [min, max] 即为 True）。
+    entry_price_min: float | None = Field(
+        None, description="理想建仓下限（元/股）"
+    )
+    entry_price_max: float | None = Field(
+        None, description="理想建仓上限（元/股）"
+    )
+    # 引擎派生：空仓 + 现价落入区间 → 触发建仓信号
+    # 前端金色高亮 + 桌面弹窗（每只股票每天最多 1 次）
+    is_entry_opportunity: bool = Field(
+        False,
+        description="空仓+现价在 [entry_price_min, entry_price_max] 区间内 → 触发建仓信号",
+    )
+
     model_config = ConfigDict(from_attributes=True)
