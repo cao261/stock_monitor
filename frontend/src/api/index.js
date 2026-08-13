@@ -172,4 +172,17 @@ export function recordTrade(id, payload) {
   return api.post(`/watchlist/${id}/trade`, payload)
 }
 
+/**
+ * v3.1 历史交割单（资金账本数据源）
+ * GET /trades/history?ts_code=&limit=
+ * @param {{ ts_code?: string, limit?: number }} params
+ * @returns {Promise<AxiosResponse<{
+ *   total_count, total_realized_pnl,
+ *   trades: [{ id, ts_code, name, action, price, volume, realized_pnl, created_at }]
+ * }>>}
+ */
+export function getTradeHistory(params = {}) {
+  return api.get('/trades/history', { params })
+}
+
 export default api

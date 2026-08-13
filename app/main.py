@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from app.config import API_DESCRIPTION, API_TITLE, API_VERSION
 from app.database import SessionLocal, init_db
 from app.models import Watchlist
-from app.routers import market_router, watchlist_router, strategy_router
+from app.routers import market_router, watchlist_router, strategy_router, trade_router
 import market_fetcher as mf
 
 # 应用启动时统一配置 logging；屏蔽 akshare 进度条噪音
@@ -143,6 +143,7 @@ async def add_charset_to_json_response(request, call_next):
 app.include_router(watchlist_router, prefix="/api")
 app.include_router(market_router, prefix="/api")
 app.include_router(strategy_router, prefix="/api")
+app.include_router(trade_router, prefix="/api")  # v3.1 资金账本
 
 
 # ====================== 健康检查 / 服务元信息 ======================

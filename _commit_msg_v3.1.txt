@@ -1,0 +1,36 @@
+fix(v3.1): 空仓幽灵告警修复 + 资金账本 + 累计已实现盈亏
+
+## 任务 1：清仓逻辑 Bug 修复（实盘最影响心态的细节）
+- analyzer.check_signals 新增 position 参数：
+  空仓时强制 is_take_profit / is_stop_loss = False
+  （量比信号 is_volume_breakout / is_shrinking_pullback 不受持仓影响）
+- analyzer.check_grid_signals 新增 position 参数：
+  空仓时强制 is_grid_sell = False
+  is_grid_buy 仍可触发（空仓等跌建仓是预期场景）
+- router quotes 端点：空仓时 floating_pnl=0, return_rate=null
+  （修复前：清仓后 DB 还存 cost_price，return_rate 算出 N% 幽灵收益率）
+
+## 任务 2：buildStrategyAdvice 空仓状态
+- 空仓 + 有网格买入信号 → "空仓等待中：跌穿网格步长 → 可建仓"
+- 空仓 + 有放量突破 → "空仓观望中：检测到放量突破 → 可关注"
+- 空仓 + 啥也没 → "👀 空仓观望中，等待买点" (slate-400 灰色，不带警示色)
+
+## 任务 3：GET /api/trades/history
+- 新建 app/routers/trade.py + main.py 注册 + __init__.py 导出
+- 返回 total_count + total_realized_pnl + trades 列表（按 created_at 倒序）
+- ts_code 可选过滤；limit 默认 200，上限 1000
+- name 字段从 watchlist 映射（trade_log 不存 FK，watchlist 删了也能查）
+
+## 任务 4：前端资金账本 Modal
+- 顶部"📝 今日复盘"旁新增"💰 资金账本"按钮（emerald 绿框）
+- 玻璃拟物 Modal：顶部累计已实现盈亏大字（红=盈 / 绿=亏，A 股惯例）
+- 下方交割单表格：时间 / 代码 / 名称 / 动作(BUY/SELL) / 成交价 / 数量 / 盈亏
+- Teleport + Esc 关闭 + 错误 / 空状态友好提示
+
+## 验证
+- sh589130 (pos=0):
+    floating_pnl = 0 ✅ (修复前 null)
+    return_rate = null ✅ (修复前 -5.57% 幽灵)
+    is_grid_sell = false ✅
+- /api/trades/history:
+    total_count=3, total_pnl=-101.05 (含 1 笔 -70 + 1 笔 -31.05)

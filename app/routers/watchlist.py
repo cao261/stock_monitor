@@ -104,10 +104,14 @@ async def list_watchlist_quotes(
             # cache miss：实时单只拉取（支持 ETF）
             quote = await mf.ensure_price_in_cache(item.ts_code)
 
-        # ===== 计算浮动盈亏 & 收益率（v1.1）=====
-        floating_pnl: float | None = None
-        return_rate: float | None = None
-        if quote is not None and item.cost_price is not None and item.position is not None:
+        # ===== 计算浮动盈亏 & 收益率（v1.1，v3.1 加空仓强校验）=====
+        # v3.1: 空仓（position is None / 0）→ 强制 floating_pnl=0, return_rate=null
+        # 避免"幽灵收益率"——用户清仓了但 cost_price 还在 DB 里，分母非零就会算出 N% 误导
+        floating_pnl: float | None = 0.0   # 空仓默认 0（v3.1：有持仓才更新为真实值）
+        return_rate: float | None = None    # 空仓默认 null（v3.1：有持仓才更新为真实值）
+        # v3.1: 提前算 is_empty_position 后面用
+        is_empty_position = (item.position is None) or (int(item.position) <= 0)
+        if not is_empty_position and quote is not None and item.cost_price is not None and item.position is not None:
             price = quote.get("price")
             if price is not None:
                 diff = float(price) - float(item.cost_price)
@@ -132,13 +136,14 @@ async def list_watchlist_quotes(
             cur_price and eff_target_win and cur_price >= eff_target_win
         )
 
-        # ===== v2.7 网格动态追踪 =====
+        # ===== v2.7 网格动态追踪（v3.1 传 position 让空仓强校验生效）=====
         eff_grid_step_pct = note_parsed["grid_step_pct"]
         grid_sig = analyzer.check_grid_signals(
             price=cur_price,
             last_grid_price=item.last_grid_price,
             cost_price=item.cost_price,
             grid_step_pct=eff_grid_step_pct,
+            position=item.position,
         )
 
         if quote is None:
@@ -266,13 +271,15 @@ def list_watchlist_signals(
         _note = parse_trade_note(item.trade_note)
         _eff_tw = item.target_win if item.target_win is not None else _note["target_win"]
         _eff_tl = item.target_loss if item.target_loss is not None else _note["target_loss"]
-        # v1.2: 把止盈/止损价也传进信号引擎，触发对应 is_take_profit / is_stop_loss
+        # v1.2 + v3.1: 把止盈/止损价 + 持仓都传进信号引擎
+        # v3.1: 传 position 让 check_signals 内部做空仓强校验（避免幽灵止损/止盈告警）
         sig = analyzer.check_signals(
             item.ts_code,
             current,
             history,
             target_win=_eff_tw,
             target_loss=_eff_tl,
+            position=item.position,
         )
         triggered = (
             sig["signals"]["is_volume_breakout"]

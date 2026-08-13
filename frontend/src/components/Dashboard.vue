@@ -8,6 +8,7 @@ import {
   getSentiment,
   getSignals,
   getTopMovers,
+  getTradeHistory,  // v3.1 资金账本
   getWatchlist,
   recordTrade,  // v3.0 真实交割（替换原来 PATCH 路径的 updateWatchlist 用法）
   refreshHistory,
@@ -76,6 +77,11 @@ const aiCopied = ref(false)      // 复制按钮反馈
 // 每天 15:00 后第一次轮询自动弹通知；用日期 + 标记避免重复触发
 const summaryNotifiedDate = ref('')  // YYYY-MM-DD，已经触发过的日期
 const SUMMARY_AUTO_TRIGGER_HOUR = 15  // 15:00 收盘
+
+// v3.1 资金账本
+const ledgerModal = ref(false)
+const ledgerData = ref({ trades: [], total_count: 0, total_realized_pnl: 0 })
+const ledgerLoading = ref(false)
 const SUMMARY_CHECK_INTERVAL_MS = 60_000  // 1 分钟检查一次
 
 // ====================== v2.4: 轻量级 Markdown 渲染 ======================
@@ -257,14 +263,22 @@ function buildStrategyAdvice(w) {
   const eff_tw = w.eff_target_win   // 实际生效的止盈
   const ret = w.return_rate         // 收益率 %
 
+  // ===== v3.1: 空仓强校验 =====
+  // 空仓时，is_grid_buy 仍可触发（等跌建仓），is_grid_sell/is_take_profit/is_stop_loss
+  // 全部被后端禁掉，前端不再做"幽灵告警"渲染
+  const isEmpty = (w.position == null) || (Number(w.position) <= 0)
+
   // v2.7 网格动态追踪 —— 最高优先级（用户明确"按纪律加/减仓"是动作意图）
   // 注意：网格买入覆盖"浮亏中盯止损"——网格用户希望越跌越买，不希望被误劝离场
+  // v3.1: 空仓时 is_grid_sell 已被后端禁掉，这里 is_grid_sell 永远不会触发（防御性）
   if (w.is_grid_buy) {
     const distPct = w.grid_distance != null ? Math.abs(w.grid_distance).toFixed(1) : '?'
     return {
       level: 'grid-buy',
       icon: '🪜',
-      text: `跌穿网格步长（${distPct}%）→ 触发加仓！`,
+      text: isEmpty
+        ? `空仓等待中：跌穿网格步长（${distPct}%）→ 可建仓`
+        : `跌穿网格步长（${distPct}%）→ 触发加仓！`,
       title: `当前价 ${fmtPrice(price)} 距基准价 ${fmtPrice(w.grid_reference_price)} ${w.grid_distance?.toFixed(2)}% ≥ ${w.eff_grid_step_pct}%`,
     }
   }
@@ -275,6 +289,27 @@ function buildStrategyAdvice(w) {
       icon: '🪜',
       text: `突破网格步长（${distPct}%）→ 触发减仓！`,
       title: `当前价 ${fmtPrice(price)} 距基准价 ${fmtPrice(w.grid_reference_price)} +${w.grid_distance?.toFixed(2)}% ≥ ${w.eff_grid_step_pct}%`,
+    }
+  }
+
+  // ===== v3.1: 空仓时 — 无任何买入信号则显示"等待买点"灰色 =====
+  // 优先级：放在所有"卖出/破止损/到止盈"信号之后
+  if (isEmpty) {
+    // 优先看是否有放量突破（可建仓信号）
+    if (w.signal?.signals?.is_volume_breakout) {
+      return {
+        level: 'info',
+        icon: '📈',
+        text: '空仓观望中：检测到放量突破 → 可关注',
+        title: '空仓时放量突破是潜在的建仓点',
+      }
+    }
+    // 否则：空仓等待
+    return {
+      level: 'empty',
+      icon: '👀',
+      text: '空仓观望中，等待买点',
+      title: '当前空仓 / 持仓 0，等待交易信号出现',
     }
   }
 
@@ -915,6 +950,24 @@ function closeSummary() {
   showSummary.value = false
 }
 
+// ====================== v3.1: 资金账本 ======================
+async function openLedger() {
+  ledgerModal.value = true
+  ledgerLoading.value = true
+  ledgerData.value = { trades: [], total_count: 0, total_realized_pnl: 0 }
+  try {
+    const r = await getTradeHistory({ limit: 500 })
+    ledgerData.value = r.data
+  } catch (e) {
+    ledgerData.value = { trades: [], total_count: 0, total_realized_pnl: 0, error: e.message }
+  } finally {
+    ledgerLoading.value = false
+  }
+}
+function closeLedger() {
+  ledgerModal.value = false
+}
+
 // v2.4.3: 召唤 AI 深度复盘
 async function summonAiReport() {
   aiError.value = ''
@@ -1075,6 +1128,13 @@ onUnmounted(() => {
                  border border-amber-500/30"
           title="查看今日 A 股复盘战报"
         >📝 今日复盘</button>
+        <button
+          @click="openLedger"
+          class="px-3 py-1.5 glass text-emerald-300 hover:text-emerald-100
+                 hover:border-emerald-500/50 text-xs transition
+                 border border-emerald-500/30"
+          title="查看所有历史交割单（已实现盈亏账本）"
+        >💰 资金账本</button>
         <button
           @click="refresh"
           :disabled="loading"
@@ -1647,6 +1707,8 @@ onUnmounted(() => {
                         'text-amber-300':        buildStrategyAdvice(w).level === 'warn',
                         'text-rose-300 font-semibold':  buildStrategyAdvice(w).level === 'danger',
                         'text-sky-300':          buildStrategyAdvice(w).level === 'info',
+                        // v3.1 空仓灰色（不带警示色）
+                        'text-slate-400':        buildStrategyAdvice(w).level === 'empty',
                         // v2.7 网格信号
                         'text-fuchsia-300 font-semibold animate-pulse': buildStrategyAdvice(w).level === 'grid-buy',
                         'text-emerald-300 font-semibold animate-pulse':  buildStrategyAdvice(w).level === 'grid-sell',
@@ -2412,6 +2474,139 @@ onUnmounted(() => {
             >
               {{ adjustDialog.submitting ? '保存中…' : '确认记账' }}
             </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ====================== v3.1 资金账本 Modal ====================== -->
+    <Teleport to="body">
+      <div
+        v-if="ledgerModal"
+        class="fixed inset-0 z-[60] flex items-center justify-center p-4
+               bg-black/70 backdrop-blur-md"
+        @click.self="closeLedger"
+        @keyup.escape="closeLedger"
+      >
+        <div
+          class="relative bg-slate-900/95 backdrop-blur-md rounded-xl
+                 border border-emerald-500/30 shadow-2xl
+                 w-full max-w-4xl max-h-[90vh] flex flex-col
+                 before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                 before:bg-gradient-to-br before:from-emerald-500/40 before:via-amber-500/30 before:to-rose-500/40
+                 before:-z-10 before:pointer-events-none"
+        >
+          <!-- 顶部条 -->
+          <div class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur
+                      border-b border-slate-700/60 px-6 py-4
+                      flex items-center justify-between rounded-t-xl">
+            <div>
+              <h3 class="text-lg font-semibold text-slate-100 flex items-center gap-2">
+                <span class="text-xl">💰</span>
+                资金账本
+              </h3>
+              <p class="text-xs text-slate-500 mt-0.5 font-mono">
+                累计已实现盈亏 · {{ ledgerData.total_count || 0 }} 笔交割 · 按 Esc 关闭
+              </p>
+            </div>
+            <button
+              @click="closeLedger"
+              class="text-slate-500 hover:text-slate-200 text-2xl leading-none
+                     w-8 h-8 flex items-center justify-center rounded
+                     hover:bg-slate-800/60 transition"
+            >×</button>
+          </div>
+
+          <!-- 内容 -->
+          <div class="px-6 py-5 overflow-y-auto">
+            <!-- 大字累计盈亏 -->
+            <div class="text-center py-6 mb-4 rounded-xl border border-slate-700/40
+                        bg-slate-950/50 relative overflow-hidden">
+              <div class="text-[10px] tracking-[0.3em] text-slate-500 mb-2 font-medium">累计已实现盈亏</div>
+              <div
+                v-if="ledgerLoading"
+                class="text-3xl text-slate-500 font-mono"
+              >加载中…</div>
+              <div
+                v-else
+                class="text-5xl font-bold font-mono tracking-tight"
+                :class="{
+                  'text-rose-400':     ledgerData.total_realized_pnl > 0,   // A 股惯例：盈利红
+                  'text-emerald-400':  ledgerData.total_realized_pnl < 0,   // A 股惯例：亏损绿
+                  'text-slate-300':    ledgerData.total_realized_pnl === 0,
+                }"
+              >
+                <span v-if="ledgerData.total_realized_pnl > 0">+¥</span>
+                <span v-else-if="ledgerData.total_realized_pnl < 0">-¥</span>
+                <span v-else>¥</span>{{ Math.abs(ledgerData.total_realized_pnl).toFixed(2) }}
+              </div>
+              <div class="text-xs text-slate-500 mt-2 font-mono">
+                买入 {{ ledgerData.trades ? ledgerData.trades.filter(t => t.action === 'BUY').length : 0 }} 笔
+                ·
+                卖出 {{ ledgerData.trades ? ledgerData.trades.filter(t => t.action === 'SELL').length : 0 }} 笔
+              </div>
+            </div>
+
+            <!-- 错误 / 空状态 -->
+            <div v-if="ledgerData.error" class="text-rose-300 text-sm bg-rose-500/10 border border-rose-500/30 rounded px-3 py-2 mb-3">
+              {{ ledgerData.error }}
+            </div>
+            <div v-else-if="!ledgerLoading && ledgerData.trades.length === 0"
+                 class="text-center text-slate-500 text-sm py-12">
+              <p class="mb-2 text-2xl">📭</p>
+              <p>还没有任何交割单记录</p>
+              <p class="text-xs text-slate-600 mt-1">点成本价旁的 🔄 按钮提交你的第一笔成交</p>
+            </div>
+
+            <!-- 交割单表格 -->
+            <div v-else-if="ledgerData.trades.length > 0" class="overflow-x-auto rounded-lg border border-slate-700/40">
+              <table class="w-full text-sm font-mono">
+                <thead class="bg-slate-800/70 text-slate-400 text-xs tracking-wider">
+                  <tr>
+                    <th class="text-left px-3 py-2 font-medium">时间</th>
+                    <th class="text-left px-3 py-2 font-medium">代码</th>
+                    <th class="text-left px-3 py-2 font-medium">名称</th>
+                    <th class="text-center px-3 py-2 font-medium">动作</th>
+                    <th class="text-right px-3 py-2 font-medium">成交价</th>
+                    <th class="text-right px-3 py-2 font-medium">数量</th>
+                    <th class="text-right px-3 py-2 font-medium">盈亏</th>
+                  </tr>
+                </thead>
+                <tbody class="divide-y divide-slate-700/30">
+                  <tr
+                    v-for="t in ledgerData.trades"
+                    :key="t.id"
+                    class="hover:bg-slate-800/40 transition"
+                  >
+                    <td class="px-3 py-2 text-slate-400 text-xs whitespace-nowrap">{{ t.created_at }}</td>
+                    <td class="px-3 py-2 text-sky-300 font-semibold">{{ t.ts_code }}</td>
+                    <td class="px-3 py-2 text-slate-300">{{ t.name || '—' }}</td>
+                    <td class="px-3 py-2 text-center">
+                      <span
+                        class="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold"
+                        :class="t.action === 'BUY'
+                          ? 'bg-sky-500/20 text-sky-300 border border-sky-500/40'
+                          : 'bg-fuchsia-500/20 text-fuchsia-300 border border-fuchsia-500/40'"
+                      >{{ t.action === 'BUY' ? '买入' : '卖出' }}</span>
+                    </td>
+                    <td class="px-3 py-2 text-right text-slate-200">{{ t.price.toFixed(4) }}</td>
+                    <td class="px-3 py-2 text-right text-slate-200">{{ t.volume.toLocaleString('zh-CN') }}</td>
+                    <td
+                      class="px-3 py-2 text-right font-semibold"
+                      :class="{
+                        'text-rose-300':     t.realized_pnl > 0,
+                        'text-emerald-300':  t.realized_pnl < 0,
+                        'text-slate-500':    t.realized_pnl === 0,
+                      }"
+                    >
+                      <span v-if="t.realized_pnl > 0">+¥{{ t.realized_pnl.toFixed(2) }}</span>
+                      <span v-else-if="t.realized_pnl < 0">-¥{{ Math.abs(t.realized_pnl).toFixed(2) }}</span>
+                      <span v-else>—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       </div>

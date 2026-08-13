@@ -124,6 +124,7 @@ def check_signals(
     *,
     target_win: float | None = None,
     target_loss: float | None = None,
+    position: int | None = None,
 ) -> dict[str, Any]:
     """对单只股票判断 4 个信号（量比 ×2 + 止盈/止损 ×2）。
 
@@ -134,8 +135,10 @@ def check_signals(
     当 5 日均量为 0（无历史数据）或非交易时段时，量比按 0 处理，**不会**触发放量信号。
 
     止盈止损（v1.2）：
-      - target_win  设置 + 现价 >= target_win  → is_take_profit
-      - target_loss 设置 + 现价 <= target_loss → is_stop_loss
+      - target_win  设置 + 现价 >= target_win + **有持仓 (position>0)**  → is_take_profit
+      - target_loss 设置 + 现价 <= target_loss + **有持仓 (position>0)** → is_stop_loss
+      - v3.1: 空仓时强制 is_take_profit / is_stop_loss = False（幽灵告警修复）
+        量比信号 (is_volume_breakout / is_shrinking_pullback) 不受持仓状态影响
       - 都触发时 `trade_message` 给出双行提示文案
     """
     avg_vol_5d = float((history or {}).get("avg_volume_5d") or 0.0)
@@ -161,9 +164,22 @@ def check_signals(
         and (vol_ratio > 0)
     )
 
-    # ===== 止盈/止损（v1.2）=====
-    is_take_profit = bool(target_win and target_win > 0 and price > 0 and price >= target_win)
-    is_stop_loss = bool(target_loss and target_loss > 0 and price > 0 and price <= target_loss)
+    # ===== v3.1: 空仓强校验 =====
+    # 空仓（position is None or <= 0）→ 止盈/止损信号全 False（避免幽灵告警）
+    # 量比信号（放量/缩量）仍可触发（用于"找买点"）
+    is_empty_position = (position is None) or (int(position) <= 0)
+
+    # ===== 止盈/止损（v1.2 + v3.1 空仓校验）=====
+    is_take_profit = bool(
+        (not is_empty_position)
+        and target_win and target_win > 0
+        and price > 0 and price >= target_win
+    )
+    is_stop_loss = bool(
+        (not is_empty_position)
+        and target_loss and target_loss > 0
+        and price > 0 and price <= target_loss
+    )
 
     # 触发文案（双行，去桌面通知的 body 用）
     trade_messages: list[str] = []
@@ -201,12 +217,13 @@ def check_signals(
     }
 
 
-# ====================== 功能 C：网格动态追踪（v2.7）======================
+# ====================== 功能 C：网格动态追踪（v2.7，v3.1 加空仓强校验）======================
 def check_grid_signals(
     price: float | None,
     last_grid_price: float | None,
     cost_price: float | None,
     grid_step_pct: float | None,
+    position: int | None = None,
 ) -> dict[str, Any]:
     """根据"现价 vs 基准价"判断网格加减仓信号。
 
@@ -217,7 +234,10 @@ def check_grid_signals(
             is_grid_buy  = grid_distance <= -grid_step_pct   # 跌到位 → 加仓
             is_grid_sell = grid_distance >=  grid_step_pct   # 涨到位 → 减仓
 
-    任何前置条件缺失（无现价 / 无基准价 / 无步长）都返回"无信号"。
+    v3.1: 空仓强校验
+        if position <= 0 (空仓)：
+            is_grid_sell 永远 False（空仓不能卖）
+            is_grid_buy  仍可触发（空仓等跌到加仓位建仓，这是预期场景）
     """
     empty: dict[str, Any] = {
         "grid_reference_price": None,
@@ -239,6 +259,11 @@ def check_grid_signals(
     grid_distance = round((float(price) - float(reference)) / float(reference) * 100.0, 2)
     is_grid_buy = bool(grid_distance <= -float(grid_step_pct))
     is_grid_sell = bool(grid_distance >= float(grid_step_pct))
+
+    # v3.1: 空仓时禁掉 is_grid_sell（避免"幽灵卖出信号"）
+    if position is None or int(position) <= 0:
+        is_grid_sell = False
+    # 关键保留：空仓时 is_grid_buy 仍触发（这是"等跌建仓"的预期信号）
 
     return {
         "grid_reference_price": float(reference),
