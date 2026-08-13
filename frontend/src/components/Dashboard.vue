@@ -225,54 +225,69 @@ function applyPreset(text) {
 
 let prevSignalCodes = new Set()
 
-// v2.6.2: 桌面通知去重 —— 每个 (ts_code, signal_kind, trade_date) 每天只弹一次
-// 用 localStorage 持久化（按日期切分，过期自动失效）
-const NOTIFY_DEDUPE_PREFIX = 'signal_notified_'
-function wasNotified(tsCode, kind, tradeDate) {
-  try {
-    return !!localStorage.getItem(NOTIFY_DEDUPE_PREFIX + tsCode + '_' + kind + '_' + tradeDate)
-  } catch (_) { return false }
-}
-function markNotified(tsCode, kind, tradeDate) {
-  try {
-    localStorage.setItem(NOTIFY_DEDUPE_PREFIX + tsCode + '_' + kind + '_' + tradeDate, '1')
-  } catch (_) {}
-}
-// v2.6.2: 信号 → 中文描述映射（给桌面通知用，让用户一眼看懂"为什么触发"）
-const SIGNAL_LABELS = {
-  is_volume_breakout:     '放量突破',
-  is_shrinking_pullback:  '缩量回踩',
-  is_take_profit:         '触发止盈',
-  is_stop_loss:           '触发止损',
-}
-
-function notifySignal(stock, sig) {
-  if (!canNotify()) return
-  const tradeDate = sig.trade_date || new Date().toISOString().slice(0, 10)
-  const name = stock.name || sig.name || stock.ts_code
-  // 哪个信号触发了
-  const triggered = []
-  for (const [k, label] of Object.entries(SIGNAL_LABELS)) {
-    if (sig.signals?.[k]) {
-      // 通知去重：每个 (股票, 信号, 交易日) 每天一次
-      if (wasNotified(stock.ts_code, k, tradeDate)) continue
-      markNotified(stock.ts_code, k, tradeDate)
-      triggered.push(label)
+// v2.6.3 智能建议生成器
+// 输入：watchlist 行（包含 trade_note / target_win / target_loss / price / cost_price / position /
+//                note_target_broken / note_target_reached / note_semantic_rules）
+// 输出：{ level: 'ok'|'warn'|'danger'|'info', icon, text }
+//   level: 控制颜色（绿/黄/红/蓝）
+//   icon: emoji
+//   text: 一句话建议，比如 "🎯 距止盈 5%，准备减仓"
+//
+// 设计原则：
+//   1. 永远输出（不只破位才显示）—— 用户能从任意行看到"现在的状态 + 建议"
+//   2. 优先级：已破止损 > 已到止盈 > 距止损 < 5% > 距止盈 < 5% > 其它
+//   3. 没有任何策略时返回 null（让列显示 —）
+function buildStrategyAdvice(w) {
+  if (!w) return null
+  // 没写 trade_note 也没设 target_*/note_extracted_*/note_semantic_rules → 没什么可建议
+  const hasAnyRule = !!(w.trade_note || w.target_win != null || w.target_loss != null
+    || w.note_extracted_target_win != null || w.note_extracted_target_loss != null
+    || (w.note_semantic_rules && w.note_semantic_rules.length))
+  if (!hasAnyRule) return null
+  // 没现价 → 没法算距离
+  if (w.price == null) {
+    return { level: 'info', icon: '⏳', text: '等待行情数据' }
+  }
+  const price = Number(w.price)
+  const eff_tl = w.eff_target_loss  // 实际生效的止损（含 note 提取值）
+  const eff_tw = w.eff_target_win   // 实际生效的止盈
+  const ret = w.return_rate         // 收益率 %
+  // 1) 已破止损（最危险）
+  if (w.note_target_broken) {
+    return { level: 'danger', icon: '🛑', text: `已破止损 ${fmtPrice(eff_tl)}，按纪律清仓` }
+  }
+  // 2) 已到止盈
+  if (w.note_target_reached) {
+    return { level: 'ok', icon: '🎯', text: `已到止盈 ${fmtPrice(eff_tw)}，考虑减仓` }
+  }
+  // 3) 距止损 < 5% 的"警戒区"
+  if (eff_tl && price > eff_tl) {
+    const distPct = (price - eff_tl) / eff_tl * 100
+    if (distPct < 5) {
+      return { level: 'warn', icon: '⚠️', text: `距止损仅 ${distPct.toFixed(1)}%，警戒区` }
     }
   }
-  if (triggered.length === 0) return
-  const body = `${name} ${sig.current?.price ?? '-'} 元 · ${triggered.join(' + ')}`
-  try {
-    const n = new Notification('🔔 盯盘信号', {
-      body,
-      tag: 'watchlist-signal-' + stock.ts_code,
-      requireInteraction: true,
-    })
-    n.onclick = () => {
-      window.focus()
-      n.close()
+  // 4) 距止盈 < 5%
+  if (eff_tw && price < eff_tw) {
+    const distPct = (eff_tw - price) / eff_tw * 100
+    if (distPct < 5) {
+      return { level: 'ok', icon: '✨', text: `距止盈仅 ${distPct.toFixed(1)}%，准备减仓` }
     }
-  } catch (e) { /* ignore */ }
+  }
+  // 5) 常规：按收益率给方向
+  if (ret != null) {
+    if (ret > 0) {
+      return { level: 'ok', icon: '✅', text: '浮盈中，坚守纪律' }
+    }
+    if (ret < 0) {
+      return { level: 'warn', icon: '🟡', text: '浮亏中，盯住止损位' }
+    }
+  }
+  // 6) 有策略但无收益数据
+  if (w.note_semantic_rules && w.note_semantic_rules.length) {
+    return { level: 'info', icon: '📋', text: `策略：${w.note_semantic_rules[0]}` }
+  }
+  return { level: 'info', icon: '💡', text: '策略已设置，关注信号' }
 }
 
 // ====================== 工具 ======================
@@ -666,53 +681,12 @@ function canNotify() {
 //     3. 优先级：止损 > 止盈 > 量价异动
 //     4. trade_note 里若指定了止盈止损价（用户没显式填但笔记里写了），也走这个通知
 //     5. 优先用 trade_message（analyzer 拼好的双行文案），更精准
-function notifyNewSignals(fresh) {
-  if (!canNotify()) return
-  // 用 trade_date 当去重 key（每个交易日只对同 (股票, 信号) 弹一次）
-  const today = new Date().toISOString().slice(0, 10)
-  for (const s of fresh) {
-    const sigs = s.signals || {}
-    const name = s.name || s.ts_code
-    const price = s.current?.price ?? s.current?.close
-    // 优先级：止损（必须手动关）> 止盈 > 量价异动
-    if (sigs.is_stop_loss) {
-      if (wasNotified(s.ts_code, 'is_stop_loss', today)) continue
-      markNotified(s.ts_code, 'is_stop_loss', today)
-      const body = s.trade_message
-        ? `${name} · ${s.trade_message} · 现价 ${fmtPrice(price)}`
-        : `${name} 触及止损 · 现价 ${fmtPrice(price)} · 建议减仓 / 离场`
-      try {
-        new Notification('🛡️ 止损信号', { body, tag: 'signal-stop-loss-' + s.ts_code, requireInteraction: true })
-      } catch (_) {}
-      continue
-    }
-    if (sigs.is_take_profit) {
-      if (wasNotified(s.ts_code, 'is_take_profit', today)) continue
-      markNotified(s.ts_code, 'is_take_profit', today)
-      const body = s.trade_message
-        ? `${name} · ${s.trade_message} · 现价 ${fmtPrice(price)}`
-        : `${name} 到达止盈 · 现价 ${fmtPrice(price)} · 注意减仓`
-      try {
-        new Notification('🎯 止盈信号', { body, tag: 'signal-take-profit-' + s.ts_code })
-      } catch (_) {}
-      continue
-    }
-    // 量价异动（每天每只股票只弹一次）
-    const kind = sigs.is_volume_breakout
-      ? 'is_volume_breakout'
-      : sigs.is_shrinking_pullback ? 'is_shrinking_pullback' : null
-    if (kind) {
-      if (wasNotified(s.ts_code, kind, today)) continue
-      markNotified(s.ts_code, kind, today)
-      const label = kind === 'is_volume_breakout' ? '放量突破' : '缩量企稳'
-      try {
-        new Notification('量价异动', {
-          body: `${name} 触发 ${label} · 量比 ${s.volume_ratio ?? '?'} · 涨幅 ${fmtPct(s.current?.change_pct)} · 现价 ${fmtPrice(price)}`,
-          tag: 'signal-' + kind + '-' + s.ts_code,
-        })
-      } catch (_) {}
-    }
-  }
+// v2.6.3: 桌面通知已移除（用户反馈不需要）
+// 改成"交易计划列永远显示智能建议 + 状态标注"，见 buildStrategyAdvice()
+// notifyNewSignals 保留空函数，避免 refresh() 里调用报 undefined
+function notifyNewSignals(_fresh) {
+  // no-op: v2.6.3 起，signals 的"提醒"全部走表格里的"策略卡"，
+  //        不再弹系统通知（用户实测反馈不需要弹窗）
 }
 async function requestNotifyPermission() {
   if (typeof Notification === 'undefined') return
@@ -1375,7 +1349,7 @@ onUnmounted(() => {
                 {{ fmtPnl(w.floating_pnl) }}
               </td>
 
-              <!-- ====== 交易计划：trade_note tooltip + 止盈止损小字 ====== -->
+              <!-- ====== v2.6.3 交易计划：策略卡（永远显示策略摘要 + 当前状态 + 智能建议） ====== -->
               <td class="py-3 px-4 text-left">
                 <div class="flex items-start gap-2">
                   <span
@@ -1391,50 +1365,55 @@ onUnmounted(() => {
                     v-else
                     class="text-slate-700 text-xs flex-shrink-0 mt-0.5"
                   >—</span>
-                  <div class="flex flex-col gap-0.5 text-xs font-mono leading-tight">
-                    <!-- v2.6.2: "已破止损"/"已到止盈" 角标（强提醒，比单纯显示数字更醒目） -->
-                    <span
-                      v-if="w.note_target_broken"
-                      class="text-rose-300 font-bold animate-pulse"
-                      :title="`当前价 ${fmtPrice(w.price)} ≤ 止损 ${fmtPrice(w.eff_target_loss)} —— 交易笔记纪律已被触发`"
-                    >⚠️ 已破止损 {{ fmtPrice(w.eff_target_loss) }}</span>
-                    <span
-                      v-if="w.note_target_reached"
-                      class="text-emerald-300 font-bold animate-pulse"
-                      :title="`当前价 ${fmtPrice(w.price)} ≥ 止盈 ${fmtPrice(w.eff_target_win)} —— 交易笔记纪律已到目标`"
-                    >🎯 已到止盈 {{ fmtPrice(w.eff_target_win) }}</span>
-                    <!-- v2.6: 用户显式设的 target 优先显示（最亮） -->
-                    <span v-if="w.target_win != null && !w.note_target_reached" class="text-emerald-400">
-                      止盈 {{ fmtPrice(w.target_win) }}
-                    </span>
-                    <span v-if="w.target_loss != null && !w.note_target_broken" class="text-rose-400">
-                      止损 {{ fmtPrice(w.target_loss) }}
-                    </span>
-                    <!-- v2.6: trade_note 智能识别 — 用户没设但 note 提到了数字，自动识别为价 -->
-                    <span
-                      v-if="w.target_win == null && w.note_extracted_target_win != null"
-                      class="text-emerald-400/60 italic"
-                      :title="`从交易笔记自动识别：止盈 ${fmtPrice(w.note_extracted_target_win)}`"
-                    >
-                      止盈 {{ fmtPrice(w.note_extracted_target_win) }} <span class="text-[9px] not-italic">🤖</span>
-                    </span>
-                    <span
-                      v-if="w.target_loss == null && w.note_extracted_target_loss != null"
-                      class="text-rose-400/60 italic"
-                      :title="`从交易笔记自动识别：止损 ${fmtPrice(w.note_extracted_target_loss)}`"
-                    >
-                      止损 {{ fmtPrice(w.note_extracted_target_loss) }} <span class="text-[9px] not-italic">🤖</span>
-                    </span>
-                    <!-- v2.6: 纯语义规则标记（"网格策略"/"次日不连板" 等无数字规则） -->
-                    <span
+                  <div class="flex flex-col gap-1 text-xs font-mono leading-tight min-w-0">
+                    <!-- 行 1: 用户设的止盈 / 止损（实色 + 60%透明斜体区分用户值 vs note 提取值） -->
+                    <div class="flex flex-wrap gap-x-2 gap-y-0.5">
+                      <span v-if="w.target_win != null" class="text-emerald-400">
+                        止盈 {{ fmtPrice(w.target_win) }}
+                      </span>
+                      <span v-if="w.target_loss != null" class="text-rose-400">
+                        止损 {{ fmtPrice(w.target_loss) }}
+                      </span>
+                      <span
+                        v-if="w.target_win == null && w.note_extracted_target_win != null"
+                        class="text-emerald-400/60 italic"
+                        :title="`从交易笔记自动识别：止盈 ${fmtPrice(w.note_extracted_target_win)}`"
+                      >
+                        止盈 {{ fmtPrice(w.note_extracted_target_win) }} <span class="text-[9px] not-italic">🤖</span>
+                      </span>
+                      <span
+                        v-if="w.target_loss == null && w.note_extracted_target_loss != null"
+                        class="text-rose-400/60 italic"
+                        :title="`从交易笔记自动识别：止损 ${fmtPrice(w.note_extracted_target_loss)}`"
+                      >
+                        止损 {{ fmtPrice(w.note_extracted_target_loss) }} <span class="text-[9px] not-italic">🤖</span>
+                      </span>
+                    </div>
+                    <!-- 行 2: 纯语义规则（无数字策略） -->
+                    <div
                       v-if="!w.target_win && !w.target_loss
                             && !w.note_extracted_target_win && !w.note_extracted_target_loss
                             && w.note_semantic_rules && w.note_semantic_rules.length"
                       class="text-slate-400 italic text-[10px]"
                       :title="`语义规则：${w.note_semantic_rules.join('、')}`"
                     >
-                      📋 {{ w.note_semantic_rules.slice(0, 2).join('·') }}{{ w.note_semantic_rules.length > 2 ? '…' : '' }}
-                    </span>
+                      📋 {{ w.note_semantic_rules.slice(0, 3).join('·') }}{{ w.note_semantic_rules.length > 3 ? '…' : '' }}
+                    </div>
+                    <!-- 行 3: v2.6.3 智能建议（永远显示：当前状态 + 该怎么做） -->
+                    <div
+                      v-if="buildStrategyAdvice(w)"
+                      class="text-[11px] flex items-center gap-1"
+                      :class="{
+                        'text-emerald-300':      buildStrategyAdvice(w).level === 'ok',
+                        'text-amber-300':        buildStrategyAdvice(w).level === 'warn',
+                        'text-rose-300 font-semibold':  buildStrategyAdvice(w).level === 'danger',
+                        'text-sky-300':          buildStrategyAdvice(w).level === 'info',
+                      }"
+                      :title="`建议生成逻辑：基于 trade_note 提取的止盈/止损位 + 当前价/收益率实时计算`"
+                    >
+                      <span>{{ buildStrategyAdvice(w).icon }}</span>
+                      <span>{{ buildStrategyAdvice(w).text }}</span>
+                    </div>
                   </div>
                 </div>
               </td>
