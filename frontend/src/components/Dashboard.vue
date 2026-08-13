@@ -1389,12 +1389,12 @@ onUnmounted(() => {
                         止损 {{ fmtPrice(w.note_extracted_target_loss) }} <span class="text-[9px] not-italic">🤖</span>
                       </span>
                     </div>
-                    <!-- 行 2: 纯语义规则（无数字策略） -->
+                    <!-- 行 2: 语义规则（动作型策略，例「网格策略」/「次日不连板就出」/「放量突破跟」）
+                         v2.6.4 修复：之前 v-if 与数字策略互斥（有 target_win/target_loss 就被吞掉），
+                         改为：只要后端识别出语义规则就显示，跟数字策略并列 -->
                     <div
-                      v-if="!w.target_win && !w.target_loss
-                            && !w.note_extracted_target_win && !w.note_extracted_target_loss
-                            && w.note_semantic_rules && w.note_semantic_rules.length"
-                      class="text-slate-400 italic text-[10px]"
+                      v-if="w.note_semantic_rules && w.note_semantic_rules.length"
+                      class="text-sky-400 italic text-[10px]"
                       :title="`语义规则：${w.note_semantic_rules.join('、')}`"
                     >
                       📋 {{ w.note_semantic_rules.slice(0, 3).join('·') }}{{ w.note_semantic_rules.length > 3 ? '…' : '' }}

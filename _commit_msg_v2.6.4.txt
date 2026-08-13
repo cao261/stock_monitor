@@ -1,0 +1,8 @@
+﻿fix(v2.6.4): 交易计划列「语义规则」与数字策略互斥导致网格策略标签被吞掉
+
+- 旧 v-if: !target_win && !target_loss && !note_extracted_* && note_semantic_rules
+  用户设了止盈 1.75/止损 1.20 时整个 div 隐藏，连「网格策略」也看不到
+- 新 v-if: 只看 note_semantic_rules 有无，跟数字策略并列显示
+- 颜色 slate-400 → sky-400：跟 level=info 一致，强调「中性参考」
+
+参考：用户实测 sh589130 反馈「我的自选股的交易策略选的是网格策略...这部分没有提示」
