@@ -998,8 +998,17 @@ function openChart(code, name, cost = null, win = null, loss = null) {
 function closeChart() {
   chartCode.value = null
 }
+// v4.2: Escape 统一关闭所有 Modal（按 z-index 从高到低，只关最顶层那个）
+//   adjustDialog z-[70] > aiPlanDialog/alphaModal z-[65] > aiReport/ledger z-[60] > summary/chart z-50
 function onKeyDown(e) {
-  if (e.key === 'Escape' && chartCode.value) closeChart()
+  if (e.key !== 'Escape') return
+  if (adjustDialog.value.open) { closeAdjustDialog(); return }
+  if (aiPlanDialog.value.open) { if (!aiPlanDialog.value.loading) dismissAiPlan(); return }
+  if (alphaModal.value) { closeAlpha(); return }
+  if (aiReportModal.value) { closeAiReport(); return }
+  if (ledgerModal.value) { closeLedger(); return }
+  if (showSummary.value) { closeSummary(); return }
+  if (chartCode.value) closeChart()
 }
 
 function canNotify() {
@@ -1087,7 +1096,9 @@ function notifyEntryOpportunity(w) {
   if (!w || !w.is_entry_opportunity) return
   if (!w.entry_price_min || !w.entry_price_max) return
   if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return
-  const key = `notify_entry_v4_${w.ts_code}_${new Date().toISOString().slice(0, 10)}`
+  const d = new Date()
+  const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const key = `notify_entry_v4_${w.ts_code}_${today}`
   try {
     if (localStorage.getItem(key)) return  // 今天已弹过
     localStorage.setItem(key, '1')
@@ -1194,15 +1205,18 @@ async function summonAiReport() {
     // v2.4.3: 直接弹出独立的全屏 AI 报告模态框（不再藏在战报模态框底部）
     aiReportModal.value = true
   } catch (e) {
-    // 后端 503 / 502 / 网络错误 → 提示
-    const status = e?.response?.status
-    const detail = e?.response?.data?.detail
+    // v4.2: axios 拦截器已把错误转成 `new Error('[status] detail')`，e.response 恒为 undefined
+    // 所以从 e.message 解析 [503] / [502] / [NETWORK]
+    const msg = String(e?.message || '')
+    const m = msg.match(/^\[(\d+|NETWORK)\]\s?(.*)$/)
+    const status = m ? (m[1] === 'NETWORK' ? null : Number(m[1])) : null
+    const detail = m ? m[2] : msg
     if (status === 503) {
       aiError.value = '🔑 ' + (detail || '未配置 LLM_API_KEY，请到项目根目录的 .env 文件设置（参考 .env.example）。')
     } else if (status === 502) {
       aiError.value = '⚠️ ' + (detail || 'LLM 服务调用失败，请检查网络 / API key / 余额。')
     } else {
-      aiError.value = '❌ ' + (detail || e.message || '未知错误')
+      aiError.value = '❌ ' + (detail || '未知错误')
     }
   } finally {
     aiLoading.value = false
@@ -1629,7 +1643,20 @@ onUnmounted(() => {
         </span>
       </div>
 
-      <div v-if="!watchlist.length" class="p-12 text-center text-slate-500 text-sm">
+      <!-- v4.2: 首次加载骨架（避免闪"自选股为空"） -->
+      <div v-if="!watchlist.length && loading" class="p-8">
+        <div class="space-y-2">
+          <div v-for="i in 4" :key="i" class="flex items-center gap-4 animate-pulse">
+            <div class="h-3 w-20 rounded bg-slate-800/70"></div>
+            <div class="h-3 w-28 rounded bg-slate-800/70"></div>
+            <div class="h-3 w-16 rounded bg-slate-800/70"></div>
+            <div class="h-3 w-16 rounded bg-slate-800/70"></div>
+            <div class="h-3 flex-1 rounded bg-slate-800/70"></div>
+          </div>
+        </div>
+      </div>
+
+      <div v-else-if="!watchlist.length" class="p-12 text-center text-slate-500 text-sm">
         自选股为空。👆 在顶部输入代码（<code class="bg-slate-800/80 px-1.5 py-0.5 rounded font-mono text-sky-300">sh600000</code> / <code class="bg-slate-800/80 px-1.5 py-0.5 rounded font-mono text-sky-300">sh510300</code>）开始。
       </div>
 
@@ -1638,9 +1665,7 @@ onUnmounted(() => {
           <thead class="bg-slate-950/40 text-slate-400 text-xs uppercase tracking-wider">
             <tr>
               <th class="text-left py-3 px-4 font-medium">代码</th>
-              <th class="text-left py-3 px-4 font-medium cursor-pointer hover:text-sky-300 transition"
-                  @click="openChart(watchlist[0]?.ts_code, watchlist[0]?.name, watchlist[0]?.cost_price, watchlist[0]?.target_win, watchlist[0]?.target_loss)"
-                  title="点击查看第一只的 K 线">名称</th>
+              <th class="text-left py-3 px-4 font-medium">名称</th>
               <th class="text-right py-3 px-4 font-medium">现价</th>
               <th
                 class="text-right py-3 px-4 font-medium cursor-pointer select-none

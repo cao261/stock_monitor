@@ -183,6 +183,13 @@ def _get_client() -> openai.AsyncOpenAI:
 
 
 # ====================== 5. 异步调用：复盘战报 ======================
+def _first_choice_text(resp) -> str:
+    """取 LLM 响应首个 choice 的文本；choices 为空时抛清晰异常（防御 IndexError）。"""
+    if not resp.choices:
+        raise RuntimeError("LLM 响应 choices 为空（可能是内容过滤或服务端异常）")
+    return (resp.choices[0].message.content or "").strip()
+
+
 async def generate_report(summary: dict) -> str:
     """调用 LLM 生成深度复盘报告（Markdown 字符串）。
 
@@ -203,8 +210,7 @@ async def generate_report(summary: dict) -> str:
         # v4.0: max_tokens 维持 1500（500-700 字 + Markdown 余量）
         max_tokens=1500,
     )
-    content = resp.choices[0].message.content or ""
-    return content.strip()
+    return _first_choice_text(resp)
 
 
 # ====================== 6. v4.0 AI 智能规划（K线 → JSON）======================
@@ -391,7 +397,7 @@ async def generate_ai_plan(
             max_tokens=800,
         )
 
-    content = (resp.choices[0].message.content or "").strip()
+    content = _first_choice_text(resp)
     logger.info("ai-plan raw content: %s", content[:200])
 
     raw = _parse_plan_json(content)
@@ -668,7 +674,7 @@ async def generate_discover(
             max_tokens=2000,
         )
 
-    content = (resp.choices[0].message.content or "").strip()
+    content = _first_choice_text(resp)
     logger.info("discover raw content: %s", content[:300])
 
     raw = _parse_plan_json(content)

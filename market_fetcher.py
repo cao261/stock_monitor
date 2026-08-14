@@ -541,6 +541,13 @@ async def fetch_fund_flow() -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     data = await loop.run_in_executor(None, fetch_fund_flow_sync)
     async with _fund_flow_lock:
+        if not data:
+            # v4.2: 空结果保留旧缓存（akshare 瞬时失败很常见），避免把已有板块数据冲掉
+            logger.warning(
+                "fund flow refresh returned empty, keep old cache (%d sectors)",
+                len(fund_flow_cache["data"]),
+            )
+            return dict(fund_flow_cache)
         fund_flow_cache["data"] = data
         fund_flow_cache["refreshed_at"] = datetime.now().isoformat(timespec="seconds")
     logger.info("fund flow refreshed: %d sectors", len(data))

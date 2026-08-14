@@ -277,9 +277,8 @@ async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
     try:
         report_md = await llm.generate_report(summary)
     except Exception as e:
-        logger_msg = f"LLM 调用失败：{e!r}"
-        import logging
-        logging.getLogger("strategy").exception(logger_msg)
+        # v4.2: 顶层 logger 已存在（line 24），不再需要局部 import
+        logger.exception("LLM 调用失败：%r", e)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"AI 复盘生成失败：{e}",
