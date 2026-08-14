@@ -15,6 +15,7 @@ from app.database import SessionLocal, init_db
 from app.models import Watchlist
 from app.routers import market_router, watchlist_router, strategy_router, trade_router
 import market_fetcher as mf
+import news_fetcher  # v4.1 7x24 财经快讯
 
 # 应用启动时统一配置 logging；屏蔽 akshare 进度条噪音
 logging.basicConfig(
@@ -98,13 +99,17 @@ async def lifespan(_: FastAPI):
     fund_flow_task = asyncio.create_task(
         mf.periodic_fund_flow_loop(), name="fund-flow"
     )
+    # 启动 v4.1 7x24 快讯后台协程（10 分钟拉一次，10 分钟内存缓存）
+    news_task = asyncio.create_task(
+        news_fetcher.periodic_news_loop(), name="news-fetcher"
+    )
     try:
         yield
     finally:
         # 关闭时取消后台协程
-        for t in (fetcher_task, fund_flow_task):
+        for t in (fetcher_task, fund_flow_task, news_task):
             t.cancel()
-        for t in (fetcher_task, fund_flow_task):
+        for t in (fetcher_task, fund_flow_task, news_task):
             try:
                 await t
             except asyncio.CancelledError:

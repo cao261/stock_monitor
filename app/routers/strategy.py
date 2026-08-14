@@ -1,6 +1,7 @@
 """策略层 / 复盘战报。"""
 from __future__ import annotations
 
+import logging
 from datetime import datetime, time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 import analyzer
 import market_fetcher as mf
+import news_fetcher  # v4.1: 7x24 快讯
 
 from app import config
 from app.crud.watchlist import watchlist as crud
@@ -19,6 +21,7 @@ from app.services import llm
 from app.utils.trade_note_parser import parse_trade_note
 
 router = APIRouter(prefix="/strategy", tags=["strategy"])
+logger = logging.getLogger("strategy")
 
 
 def get_today_trades(db: Session) -> list[dict]:
@@ -305,4 +308,123 @@ async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
         "file_name": report_filename,
         # 把战报数据也回传，前端如果想要"对照看"不用再调一次
         "summary": summary,
+    }
+
+
+# ====================== v4.1: AI 共振挖掘（Alpha Discovery）======================
+@router.get(
+    "/discover",
+    summary="v4.1 Alpha 共振挖掘（技术面 + 消息面融合 → 3 个短线方向）",
+)
+async def discover() -> dict:
+    """v4.1: AI 共振挖掘 — 找 3 个『技术面资金/放量 + 消息面利好』共振板块。
+
+    数据组装:
+    - 技术面: 涨幅 Top 30 + 成交量 Top 30 (from all_stocks_cache)
+    - 资金流: 净流入 Top 20 板块 (from fund_flow_cache)
+    - 消息面: 最近 50 条快讯 (from news_fetcher cache, 10min 缓存)
+
+    调 LLM 输出 3 个最值得短线关注的方向（含代表个股）。
+    """
+    if not config.LLM_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="LLM 未启用。请在项目根目录的 .env 里设置 LLM_API_KEY。",
+        )
+
+    # ===== 1. 技术面：涨幅 Top 30 + 成交 Top 30 =====
+    all_stocks = mf.get_all_stocks()
+    by_chg = sorted(
+        (
+            (c, d) for c, d in all_stocks.items()
+            if d.get("change_pct") is not None
+        ),
+        key=lambda kv: kv[1]["change_pct"],
+        reverse=True,
+    )
+    gainers: list[dict] = [
+        {
+            "code": c,
+            "name": d.get("name", ""),
+            "change_pct": round(d["change_pct"], 2),
+            "price": d.get("price"),
+        }
+        for c, d in by_chg[:30]
+    ]
+
+    by_vol = sorted(
+        (
+            (c, d) for c, d in all_stocks.items()
+            if d.get("volume") and d.get("volume", 0) > 0
+        ),
+        key=lambda kv: kv[1]["volume"],
+        reverse=True,
+    )
+    volume: list[dict] = [
+        {
+            "code": c,
+            "name": d.get("name", ""),
+            "volume": int(d.get("volume", 0)),
+            "change_pct": round(d.get("change_pct") or 0.0, 2),
+        }
+        for c, d in by_vol[:30]
+    ]
+
+    # ===== 2. 资金流：净流入 Top 20 板块 =====
+    fund_flow = mf.get_fund_flow()
+    sectors_all = list(fund_flow.get("data", []))
+    sectors = sorted(
+        [s for s in sectors_all if s.get("net_amount", 0) > 0],
+        key=lambda s: s.get("net_amount", 0.0),
+        reverse=True,
+    )[:20]
+
+    # ===== 3. 消息面：news_fetcher 缓存（10 分钟有效）=====
+    news_cache = news_fetcher.get_news()
+    news = news_cache.get("data", [])
+    if not news and not news_fetcher.is_news_cache_fresh():
+        # 缓存空且过期, 主动拉一次（前端在 loading 时等一下, 拿到最新数据）
+        try:
+            await news_fetcher.refresh_news()
+            news_cache = news_fetcher.get_news()
+            news = news_cache.get("data", [])
+        except Exception:
+            logger.warning("/discover 主动拉新闻失败: %s", news_cache.get("error"))
+
+    if not news:
+        # 兜底: 让前端能拿到 error 字段做提示
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"消息面数据暂不可用（{news_cache.get('error') or '暂无快讯'}）。"
+                "请稍后重试，或检查网络。"
+            ),
+        )
+
+    # ===== 4. 调 LLM =====
+    try:
+        result = await llm.generate_discover(
+            gainers=gainers, volume=volume, sectors=sectors, news=news,
+        )
+    except Exception as e:
+        logger.exception("discover LLM call failed")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI 挖掘调用失败：{e}",
+        ) from e
+
+    return {
+        "discoveries": result["discoveries"],
+        "model": result["model"],
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        # 附带元信息（前端 Modal 可展示"基于 X 条新闻 / Y 只异动股"）
+        "meta": {
+            "gainers_count": len(gainers),
+            "volume_count": len(volume),
+            "sectors_count": len(sectors),
+            "news_count": len(news),
+            "news_source": news_cache.get("source"),
+            "news_fetched_at": news_cache.get("fetched_at"),
+            "news_error": news_cache.get("error"),
+        },
     }

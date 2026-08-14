@@ -45,6 +45,7 @@ _ai_report_*.txt
 _ai_report_*.md
 _uvicorn_*.log
 _uvicorn.log
+_uv_*.log
 _uvicorn_err.log
 _uvicorn_out.log
 _vite_*.log

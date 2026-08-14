@@ -5,7 +5,8 @@ import {
   aiPlan,  // v4.0 AI 智能规划（教 LLM 看 K 线，输出建仓计划）
   getAiReport,
   getDailySummary,
-  getFundFlow,
+  getDiscover,  // v4.1 Alpha 共振挖掘（技术+消息融合 LLM）
+  getFundFlow,  // 板块资金流向
   getSentiment,
   getSignals,
   getTopMovers,
@@ -83,6 +84,19 @@ const SUMMARY_AUTO_TRIGGER_HOUR = 15  // 15:00 收盘
 const ledgerModal = ref(false)
 const ledgerData = ref({ trades: [], total_count: 0, total_realized_pnl: 0 })
 const ledgerLoading = ref(false)
+
+// v4.1 Alpha 共振挖掘 Modal —— 科技感宽屏模态框
+const alphaModal = ref(false)
+const alphaLoading = ref(false)
+const alphaResult = ref(null)  // 接口返回的 { discoveries, model, generated_at, meta }
+const alphaError = ref('')     // 错误信息（用户友好）
+const alphaLoadingStep = ref(0)  // 文字律动当前步骤: 0/1/2
+let alphaLoadingTimer = null
+const ALPHA_LOADING_STEPS = [
+  '正在扫描全市场量价异动...',
+  '正在解析 24 小时政策消息...',
+  '正在计算共振节点...',
+]
 
 // v4.0 AI 智能规划 —— 弹确认 Modal 的状态
 // aiPlanDialog 结构：{ open, w, result, loading }
@@ -1125,6 +1139,50 @@ function closeLedger() {
   ledgerModal.value = false
 }
 
+// ====================== v4.1: Alpha 共振挖掘 ======================
+async function openAlpha() {
+  alphaModal.value = true
+  alphaLoading.value = true
+  alphaResult.value = null
+  alphaError.value = ''
+  alphaLoadingStep.value = 0
+  // 文字律动: 每 1.2s 切换一句
+  if (alphaLoadingTimer) clearInterval(alphaLoadingTimer)
+  alphaLoadingTimer = setInterval(() => {
+    alphaLoadingStep.value = (alphaLoadingStep.value + 1) % ALPHA_LOADING_STEPS.length
+  }, 1200)
+  try {
+    const r = await getDiscover()
+    alphaResult.value = r.data
+  } catch (e) {
+    alphaError.value = e?.message || '挖掘失败'
+  } finally {
+    alphaLoading.value = false
+    if (alphaLoadingTimer) {
+      clearInterval(alphaLoadingTimer)
+      alphaLoadingTimer = null
+    }
+  }
+}
+
+function closeAlpha() {
+  alphaModal.value = false
+  if (alphaLoadingTimer) {
+    clearInterval(alphaLoadingTimer)
+    alphaLoadingTimer = null
+  }
+}
+
+// 卡片上的个股 → 联动 v2.1 K线图
+function openAlphaChart(code, name) {
+  // 关掉 Alpha Modal（用户看 K 线时不被遮），再开 K线模态框
+  closeAlpha()
+  // nextTick 等 Modal 动画完, 避免两个 Modal 抢焦点
+  nextTick(() => {
+    openChart(code, name)
+  })
+}
+
 // v2.4.3: 召唤 AI 深度复盘
 async function summonAiReport() {
   aiError.value = ''
@@ -1278,6 +1336,20 @@ onUnmounted(() => {
           class="px-3 py-1.5 glass text-slate-300 hover:text-slate-100
                  hover:border-sky-500/50 text-xs transition"
         >🔔 开启通知</button>
+        <!-- v4.1: Alpha 共振挖掘 - 紫蓝发光按钮 -->
+        <button
+          @click="openAlpha"
+          class="px-3 py-1.5 text-xs font-medium rounded transition
+                 bg-gradient-to-r from-purple-500/25 via-indigo-500/20 to-sky-500/25
+                 border border-purple-400/50
+                 text-purple-200 hover:text-purple-100
+                 hover:from-purple-500/35 hover:via-indigo-500/30 hover:to-sky-500/35
+                 hover:border-purple-400/70
+                 shadow-[0_0_18px_rgba(139,92,246,0.25)]
+                 hover:shadow-[0_0_24px_rgba(139,92,246,0.45)]
+                 flex items-center gap-1.5"
+          title="v4.1: AI 游资大脑扫描『技术+消息』共振方向"
+        >🔭 发现 Alpha</button>
         <button
           @click="openSummary"
           class="px-3 py-1.5 glass text-amber-300 hover:text-amber-100
@@ -3061,6 +3133,172 @@ onUnmounted(() => {
               <span v-else>✨</span>
               {{ aiPlanSaving ? '保存中…' : '应用 AI 建议' }}
             </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+
+    <!-- ====================== v4.1 Alpha 共振挖掘 Modal ====================== -->
+    <Teleport to="body">
+      <div
+        v-if="alphaModal"
+        class="fixed inset-0 z-[65] flex items-center justify-center p-4
+               bg-black/75 backdrop-blur-md"
+        @click.self="closeAlpha"
+      >
+        <div
+          class="relative bg-slate-900/90 backdrop-blur-md rounded-xl
+                 border border-purple-400/40 shadow-2xl
+                 w-full max-w-5xl max-h-[90vh] overflow-y-auto
+                 before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                 before:bg-gradient-to-br before:from-purple-500/40
+                   before:via-indigo-500/30 before:to-sky-500/40
+                 before:-z-10 before:pointer-events-none"
+        >
+          <!-- 顶部条 -->
+          <div class="sticky top-0 z-10 bg-slate-900/95 backdrop-blur
+                      flex items-center justify-between px-6 py-4
+                      border-b border-purple-400/30 rounded-t-xl">
+            <div>
+              <h3 class="text-xl font-semibold text-purple-200 flex items-center gap-2">
+                <span class="text-2xl">🔭</span>
+                发现 Alpha
+                <span class="text-xs font-normal text-slate-500 font-mono">
+                  {{ alphaResult?.model ? '· ' + alphaResult.model : '' }}
+                </span>
+              </h3>
+              <p class="text-xs text-slate-500 mt-0.5 font-mono">
+                v4.1 游资大脑扫描「技术面 + 消息面」共振方向
+                <span v-if="alphaResult?.meta">
+                  · 涨幅 {{ alphaResult.meta.gainers_count }} · 放量 {{ alphaResult.meta.volume_count }}
+                  · 板块 {{ alphaResult.meta.sectors_count }} · 快讯 {{ alphaResult.meta.news_count }}
+                </span>
+              </p>
+            </div>
+            <button
+              @click="closeAlpha"
+              class="text-slate-500 hover:text-slate-200 text-2xl leading-none w-8 h-8 flex items-center justify-center"
+              title="关闭"
+            >×</button>
+          </div>
+
+          <!-- 加载中：科技感文字律动 -->
+          <div v-if="alphaLoading" class="px-6 py-20 text-center">
+            <div class="text-6xl mb-6 inline-block
+                        animate-[spin_3s_linear_infinite]
+                        [filter:drop-shadow(0_0_24px_rgba(139,92,246,0.6))]">🔭</div>
+            <div class="space-y-3">
+              <Transition name="fade" mode="out-in">
+                <p
+                  :key="alphaLoadingStep"
+                  class="text-purple-200 text-base font-mono
+                         [text-shadow:0_0_12px_rgba(139,92,246,0.5)]"
+                >{{ ALPHA_LOADING_STEPS[alphaLoadingStep] }}</p>
+              </Transition>
+              <div class="flex justify-center gap-1.5 pt-3">
+                <span
+                  v-for="(s, i) in ALPHA_LOADING_STEPS"
+                  :key="i"
+                  class="h-1 rounded-full transition-all duration-500"
+                  :class="i === alphaLoadingStep
+                    ? 'w-12 bg-purple-400 shadow-[0_0_8px_rgba(139,92,246,0.7)]'
+                    : 'w-2 bg-slate-600'"
+                ></span>
+              </div>
+            </div>
+            <p class="text-slate-600 text-xs mt-8 font-mono">
+              通常需要 15-30 秒（LLM 冷启动 + 跨 4 维数据融合推理）
+            </p>
+          </div>
+
+          <!-- 错误 -->
+          <div v-else-if="alphaError" class="px-6 py-16 text-center">
+            <div class="text-5xl mb-4">⚠️</div>
+            <p class="text-rose-300 text-sm mb-2">挖掘失败</p>
+            <p class="text-slate-400 text-xs font-mono">{{ alphaError }}</p>
+            <button
+              @click="openAlpha"
+              class="mt-4 px-4 py-2 text-sm rounded
+                     bg-slate-700/60 hover:bg-slate-700/90 text-slate-200 transition"
+            >重试</button>
+          </div>
+
+          <!-- 已加载：3 张 Alpha 卡片 -->
+          <div v-else-if="alphaResult" class="p-6 space-y-4">
+            <p v-if="!alphaResult.discoveries?.length" class="text-center text-slate-500 text-sm py-8">
+              当前没有发现值得关注的共振方向，过会儿再试或检查板块数据。
+            </p>
+            <div
+              v-for="(d, i) in alphaResult.discoveries"
+              :key="`d-${i}`"
+              class="relative rounded-xl p-5 border bg-slate-950/50
+                     before:absolute before:inset-0 before:rounded-xl before:p-[1px]
+                     before:bg-gradient-to-br before:from-purple-500/30 before:via-transparent before:to-sky-500/30
+                     before:-z-10 before:pointer-events-none"
+              :class="d.level === '高'
+                ? 'border-purple-400/50 shadow-[0_0_24px_rgba(139,92,246,0.15)]'
+                : 'border-slate-700/50'"
+            >
+              <!-- 卡片头部: 序号 + 板块 + 评级 -->
+              <div class="flex items-start justify-between gap-3 mb-3">
+                <div class="flex items-center gap-2.5 min-w-0 flex-1">
+                  <span
+                    class="flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold font-mono"
+                    :class="d.level === '高'
+                      ? 'bg-purple-500/30 text-purple-100 border border-purple-400/60 shadow-[0_0_12px_rgba(139,92,246,0.4)]'
+                      : 'bg-sky-500/25 text-sky-100 border border-sky-400/50'"
+                  >0{{ i + 1 }}</span>
+                  <h4
+                    class="text-base font-semibold truncate"
+                    :class="d.level === '高' ? 'text-purple-100' : 'text-sky-100'"
+                  >{{ d.sector }}</h4>
+                </div>
+                <span
+                  class="text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-wider whitespace-nowrap"
+                  :class="d.level === '高'
+                    ? 'bg-purple-500/30 text-purple-100 border border-purple-400/60 animate-pulse'
+                    : 'bg-sky-500/25 text-sky-200 border border-sky-400/50'"
+                >{{ d.level }} 共振</span>
+              </div>
+
+              <!-- 共振逻辑 -->
+              <p class="text-sm text-slate-300 leading-relaxed mb-4 whitespace-pre-wrap">
+                {{ d.logic }}
+              </p>
+
+              <!-- 代表性个股（点击 → 弹 K 线图） -->
+              <div>
+                <p class="text-[10px] text-slate-500 uppercase tracking-wider mb-2">代表性个股 → 点名看 K 线</p>
+                <div class="flex flex-wrap gap-2">
+                  <button
+                    v-for="s in d.stocks"
+                    :key="`${d.sector}-${s.code}`"
+                    @click="openAlphaChart(s.code, s.name)"
+                    class="text-xs px-2.5 py-1 rounded
+                           bg-slate-800/80 hover:bg-sky-500/30
+                           text-slate-200 hover:text-sky-100
+                           border border-slate-700/60 hover:border-sky-400/60
+                           font-mono transition cursor-pointer
+                           flex items-center gap-1.5"
+                    :title="`点击查看 ${s.name} (${s.code}) 的 K 线`"
+                  >
+                    <span>{{ s.name || s.code }}</span>
+                    <span class="text-slate-500 text-[10px]">{{ s.code }}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <!-- 底部数据来源说明 -->
+            <div v-if="alphaResult.meta" class="text-[10px] text-slate-600 font-mono text-center pt-2">
+              模型 {{ alphaResult.model }} · 生成于 {{ alphaResult.generated_at }}
+              <span v-if="alphaResult.meta.news_source">
+                · 快讯源: {{ alphaResult.meta.news_source }}
+              </span>
+              <span v-if="alphaResult.meta.news_error" class="text-amber-500/70">
+                · {{ alphaResult.meta.news_error }}
+              </span>
+            </div>
           </div>
         </div>
       </div>

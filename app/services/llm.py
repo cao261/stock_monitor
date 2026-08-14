@@ -404,3 +404,272 @@ async def generate_ai_plan(
         )
 
     return plan
+
+
+# ====================== 7. v4.1 AI 共振挖掘（Alpha Discovery）======================
+DISCOVER_SYSTEM_PROMPT = (
+    "你是一个极其敏锐的 A 股游资大脑，有 10 年短线博弈经验。\n"
+    "你擅长从『技术面资金异动』和『消息面催化』的交叉点中挖掘出短线爆发方向。\n"
+    "你的输出必须基于**给定数据**，不能凭空编造股票代码或板块名。\n"
+    "请用**严格合法 JSON** 格式输出，不要任何 markdown 包裹、不要解释性文字。"
+)
+
+DISCOVER_USER_PROMPT = """请基于以下实时数据，挖掘 3 个最值得短线关注的【技术+消息共振】方向。
+
+【技术面】
+- 涨幅榜 Top {n_gainers}（按 change_pct 倒序）
+{gainers_block}
+
+- 成交量异动 Top {n_volume}（按 volume 倒序）
+{volume_block}
+
+- 资金净流入板块 Top {n_sectors}（按 net_amount 倒序）
+{sectors_block}
+
+【消息面】最近 24 小时核心快讯（{n_news} 条）
+{news_block}
+
+【任务】
+1. 寻找【技术面资金流入/放量】与【消息面利好催化】的强共振
+2. 找出 3 个最值得短线关注的方向（板块/题材）
+3. 每个方向给出：
+   - sector: 板块/题材名
+   - logic: 100-200 字的共振逻辑（必须**同时**解释技术面证据 + 消息面催化）
+   - stocks: 3-5 只代表性个股（**必须从涨幅榜/成交量榜里挑**，每只: code 用 sh600xxx 形式，name 是股票名）
+   - level: "高" / "中"（共振强度）
+
+【输出 schema（严格 JSON）】
+{{
+  "discoveries": [
+    {{"sector": "...", "logic": "...", "stocks": [{{"code": "sh600xxx", "name": "..."}}, ...], "level": "高"}},
+    {{"sector": "...", "logic": "...", "stocks": [{{"code": "sz000xxx", "name": "..."}}, ...], "level": "中"}},
+    {{"sector": "...", "logic": "...", "stocks": [{{"code": "sh688xxx", "name": "..."}}, ...], "level": "中"}}
+  ]
+}}
+
+注意：
+1. code 必须是带 sh/sz/bj 前缀的合法 A 股代码（从涨幅榜/成交量榜里挑）
+2. sector 板块名要从资金流向数据里挑，不要凭空创造
+3. logic 必须有 1 条消息 + 1 条技术证据，不能只空喊题材
+4. level 高 = 资金+消息+股价 三角共振；中 = 只有 2 个维度共振
+5. 找不到共振时 discoveries 可少于 3 个（不要凑数）
+
+请直接输出 JSON："""
+
+
+def _normalize_6digit(code: str) -> str:
+    """6 位纯数字 → 带 sh/sz/bj 前缀的 A 股代码。
+
+    复用 market_fetcher 的归一化规则（延迟 import 避免循环依赖）：
+      6/9/5 → sh, 0/3 → sz, 4/8 → bj
+    """
+    if not re.match(r"^\d{6}$", code):
+        return code
+    try:
+        from market_fetcher import _normalize_code as _nf
+        return _nf(code)
+    except Exception:
+        first = code[0]
+        if first in ("6", "9", "5"):
+            return "sh" + code
+        if first in ("4", "8"):
+            return "bj" + code
+        return "sz" + code
+
+
+def build_discover_messages(
+    gainers: list[dict],
+    volume: list[dict],
+    sectors: list[dict],
+    news: list[dict],
+) -> list[dict]:
+    """打包 discover 用的 messages。"""
+    def _fmt_gainers() -> str:
+        return "\n".join(
+            f"- {(g.get('name') or g.get('code'))} ({g.get('code')}): "
+            f"+{g.get('change_pct', 0):.2f}%"
+            for g in gainers
+        )
+
+    def _fmt_volume() -> str:
+        return "\n".join(
+            f"- {(v.get('name') or v.get('code'))} ({v.get('code')}): "
+            f"{int(v.get('volume', 0)):,}手, "
+            f"涨跌 {v.get('change_pct', 0):+.2f}%"
+            for v in volume
+        )
+
+    def _fmt_sectors() -> str:
+        return "\n".join(
+            f"- {s.get('name')}: 净额 {s.get('net_amount', 0):+.2f}亿, "
+            f"领涨 {s.get('leading_stock') or '-'} "
+            f"({s.get('leading_change_pct', 0):+.2f}%), "
+            f"板块涨跌 {s.get('change_pct', 0):+.2f}%"
+            for s in sectors
+        )
+
+    def _fmt_news() -> str:
+        lines: list[str] = []
+        for n in news:
+            t = n.get("time", "") or "?"
+            # 只显示 HH:MM:SS
+            if "T" in t:
+                t = t.split("T", 1)[1][:8]
+            title = n.get("title") or n.get("content", "")[:80]
+            lines.append(f"- [{t}] {title}")
+        return "\n".join(lines)
+
+    return [
+        {"role": "system", "content": DISCOVER_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": DISCOVER_USER_PROMPT.format(
+                n_gainers=len(gainers), gainers_block=_fmt_gainers(),
+                n_volume=len(volume), volume_block=_fmt_volume(),
+                n_sectors=len(sectors), sectors_block=_fmt_sectors(),
+                n_news=len(news), news_block=_fmt_news(),
+            ),
+        },
+    ]
+
+
+def _sanitize_discoveries(
+    raw: dict,
+    gainers: list[dict],
+    volume: list[dict],
+) -> dict:
+    """清洗 LLM 返回的 discover JSON。
+
+    严格性:
+    - code 必须匹配 sh/sz/bj + 6 位数字（白名单）
+    - 6 位纯数字自动补前缀
+    - 每个方向的 stocks 必须**严格从 gainers/volume 里挑**（不在白名单内的 code 丢弃）
+      这是为了让前端【可点击个股 → 弹 K线图】的联动能 100% 落地
+    - 至少要有 1 只合法 stock 才保留该方向
+    """
+    if not isinstance(raw, dict):
+        raw = {}
+
+    # 白名单：所有出现过的合法 code
+    known_codes: dict[str, str] = {}  # code -> name
+    for src in (gainers, volume):
+        for s in src:
+            c = (s.get("code") or "").lower()
+            if re.match(r"^(sh|sz|bj)\d{6}$", c):
+                known_codes[c] = s.get("name") or c
+
+    raw_list = raw.get("discoveries", []) or []
+    if not isinstance(raw_list, list):
+        raw_list = []
+
+    out: list[dict] = []
+    for d in raw_list[:5]:  # 至多 5 个方向（前端展示 3 个，留余量）
+        if not isinstance(d, dict):
+            continue
+        sector = str(d.get("sector", "")).strip()[:50] or "未知方向"
+        logic = str(d.get("logic", "")).strip()[:500]
+        level = str(d.get("level", "")).strip()
+        if level not in ("高", "中", "低"):
+            level = "中"
+
+        # 清洗 stocks
+        raw_stocks = d.get("stocks", []) or []
+        if not isinstance(raw_stocks, list):
+            raw_stocks = []
+        stocks: list[dict] = []
+        seen_codes: set[str] = set()
+        for s in raw_stocks[:5]:
+            if not isinstance(s, dict):
+                continue
+            code_raw = str(s.get("code", "")).strip().lower()
+            name = str(s.get("name", "")).strip()[:20]
+            # 6 位纯数字自动补前缀
+            if re.match(r"^\d{6}$", code_raw):
+                code_raw = _normalize_6digit(code_raw)
+            # 严格校验
+            if not re.match(r"^(sh|sz|bj)\d{6}$", code_raw):
+                logger.warning("discover drop invalid code: %r (sector=%s)", code_raw, sector)
+                continue
+            # 白名单校验: 必须从 gainers/volume 里出现过
+            if code_raw not in known_codes:
+                logger.warning(
+                    "discover drop code not in whitelist: %r (sector=%s)",
+                    code_raw, sector,
+                )
+                continue
+            if code_raw in seen_codes:
+                continue
+            seen_codes.add(code_raw)
+            # name 兜底
+            if not name:
+                name = known_codes[code_raw]
+            stocks.append({"code": code_raw, "name": name})
+
+        if not stocks:
+            logger.warning("discover drop sector without valid stock: %s", sector)
+            continue
+
+        out.append({
+            "sector": sector,
+            "logic": logic,
+            "stocks": stocks,
+            "level": level,
+        })
+
+    return {
+        "discoveries": out[:3],  # 最终保留 3 个
+        "model": config.LLM_MODEL_NAME,
+    }
+
+
+async def generate_discover(
+    gainers: list[dict],
+    volume: list[dict],
+    sectors: list[dict],
+    news: list[dict],
+) -> dict:
+    """v4.1: AI 共振挖掘 — 给定技术+消息面数据，输出 3 个最值得关注的板块方向。
+
+    Returns:
+        dict: {
+            "discoveries": [{"sector", "logic", "stocks": [{"code", "name"}], "level"}, ...],
+            "model": str,
+        }
+
+    错误处理:
+    - LLM 未配置 → RuntimeError（让 router 返 503）
+    - 网络错误 → 透传原 openai 异常（让 router 返 502）
+    - JSON 解析失败 → 走 _parse_plan_json 三重兜底
+    - 没有合法 discoveries → 返回空列表（router 返 200 但 discoveries=[]）
+    """
+    client = _get_client()
+    messages = build_discover_messages(gainers, volume, sectors, news)
+    logger.info(
+        "calling LLM (discover): model=%s gainers=%d volume=%d sectors=%d news=%d",
+        config.LLM_MODEL_NAME, len(gainers), len(volume), len(sectors), len(news),
+    )
+
+    try:
+        resp = await client.chat.completions.create(
+            model=config.LLM_MODEL_NAME,
+            messages=messages,
+            temperature=0.6,  # 比规划稍高（要敢想敢推）
+            max_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+    except Exception as e:
+        logger.warning(
+            "discover response_format=json_object 失败，降级为普通调用: %r", e
+        )
+        resp = await client.chat.completions.create(
+            model=config.LLM_MODEL_NAME,
+            messages=messages,
+            temperature=0.6,
+            max_tokens=2000,
+        )
+
+    content = (resp.choices[0].message.content or "").strip()
+    logger.info("discover raw content: %s", content[:300])
+
+    raw = _parse_plan_json(content)
+    return _sanitize_discoveries(raw, gainers=gainers, volume=volume)

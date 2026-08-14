@@ -208,4 +208,27 @@ export function aiPlan(id) {
   return api.post(`/watchlist/${id}/ai-plan`)
 }
 
+/**
+ * v4.1 Alpha 共振挖掘（技术+消息面融合 → 3 个短线方向）
+ * GET /strategy/discover
+ *
+ * @returns {Promise<AxiosResponse<{
+ *   discoveries: [{
+ *     sector: string,
+ *     logic: string,
+ *     stocks: [{code, name}, ...],
+ *     level: '高' | '中' | '低',
+ *   }, ...],
+ *   model: string,
+ *   generated_at: string,
+ *   meta: {
+ *     gainers_count, volume_count, sectors_count, news_count,
+ *     news_source, news_fetched_at, news_error,
+ *   },
+ * }>>}
+ */
+export function getDiscover() {
+  return api.get('/strategy/discover')
+}
+
 export default api
