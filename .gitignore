@@ -15,6 +15,9 @@ data/*.db-journal
 data/*.db-wal
 data/*.db-shm
 
+# v4.2: AI 复盘报告（运行时产物，随召唤生成，不入库）
+data/ai_reports/
+
 # ====================== 前端构建产物 ======================
 # frontend/.gitignore 已经覆盖 node_modules / dist / .vscode
 # 这里只补一条根目录的兜底
