@@ -457,63 +457,84 @@ async def generate_ai_plan(
     return plan
 
 
-# ====================== 7. v4.1 AI 共振挖掘（Alpha Discovery）======================
+# ====================== 7. v4.1 AI 前瞻 Alpha 掘金（低位埋伏与拐点发现）======================
 DISCOVER_SYSTEM_PROMPT = (
-    "你是一个极其敏锐的 A 股游资大脑，有 10 年短线博弈经验。\n"
-    "你擅长从『技术面资金异动』和『消息面催化』的交叉点中挖掘出短线爆发方向。\n"
-    "你的输出必须基于**给定数据**，不能凭空编造股票代码或板块名。\n"
-    "请用**严格合法 JSON** 格式输出，不要任何 markdown 包裹、不要解释性文字。"
+    "你是一个顶级 A 股宏观与游资策略分析师，拥有 10 年前瞻性题材挖掘与低位埋伏经验。\n"
+    "你的使命：结合【政策/产业前瞻催化】与【低位技术形态蓄势】，发掘未来 1~5 个交易日具备爆发潜力的【低位埋伏与拐点爆发方向】。\n\n"
+    "【核心操盘原则】：\n"
+    "1. 严禁事后解释已经大涨/暴涨的股票！你的核心价值是帮助投资者在【低位、缩量企稳、均线粘合、主力温和吸筹】阶段提前埋伏。\n"
+    "2. 挖掘“有前瞻催化逻辑、有预期差、技术面位置低、风险收益比极高”的方向与标的。\n"
+    "3. 请用【严格合法 JSON】格式输出，不要任何 markdown 包裹、不要解释性文字。"
 )
 
-DISCOVER_USER_PROMPT = """请基于以下实时数据，挖掘 3 个最值得短线关注的【技术+消息共振】方向。
+DISCOVER_USER_PROMPT = """请基于以下多维市场数据，挖掘 3 个最值得【低位埋伏 / 拐点低吸】的前瞻爆发方向。
 
-【技术面】
-- 涨幅榜 Top {n_gainers}（按 change_pct 倒序）
-{gainers_block}
-
-- 成交量异动 Top {n_volume}（按 volume 倒序）
-{volume_block}
-
-- 资金净流入板块 Top {n_sectors}（按 net_amount 倒序）
-{sectors_block}
-
-【消息面】最近 24 小时核心快讯（{n_news} 条）
+【1. 消息面：最近 24 小时核心快讯与政策催化（{n_news} 条）】
 {news_block}
 
-【任务】
-1. 寻找【技术面资金流入/放量】与【消息面利好催化】的强共振
-2. 找出 3 个最值得短线关注的方向（板块/题材）
-3. 每个方向给出：
-   - sector: 板块/题材名
-   - logic: 100-200 字的共振逻辑（必须**同时**解释技术面证据 + 消息面催化）
-   - stocks: 3-5 只代表性个股（**必须从涨幅榜/成交量榜里挑**，每只: code 用 sh600xxx 形式，name 是股票名）
-   - level: "高" / "中"（共振强度）
+【2. 资金流向：主力净流入板块 Top {n_sectors}】
+{sectors_block}
+
+【3. 低位蓄势与温和吸筹标的池（涨跌幅温和，处于低位震荡/蓄势区，适合低吸埋伏）】
+{low_accum_block}
+
+【4. 今日市场主线与领涨先锋（供研判风口扩散与低位补涨关联）】
+{momentum_block}
+
+【任务要求】
+找出 3 个具备前瞻催化、预期差大、适合在低位逢低埋伏的方向：
+- sector: 题材/板块名称
+- ambush_type: 埋伏类型（如 "政策催化左侧潜伏" / "主线分歧低位补涨" / "缩量企稳拐点低吸" / "重磅事件倒计时"）
+- catalyst_window: 预判爆发时间窗口（如 "未来 1-3 个交易日" / "下周重磅大会前夕" / "本月中旬政策预期"）
+- catalyst_logic: 前瞻催化与预期差逻辑（≤150字，说明未来可能发酵的重磅事件/政策与市场预期差）
+- technical_pattern: 低位技术特征与主力蓄势迹象（≤80字，说明底部形态、缩量企稳或温和吸筹特征）
+- stocks: 3-4 只低位埋伏代表标的，每只必须包含：
+  - code: 带 sh/sz/bj 前缀的代码（如 sh600xxx / sz00xxxx）
+  - name: 股票名称
+  - current_price: 现价（数字）
+  - ambush_zone: [min, max] 建议低吸埋伏买点区间（数字数组）
+  - target_win: 目标止盈价（数字）
+  - stop_loss: 防守止损价（数字）
+  - stock_logic: ≤30 字的个股专属埋伏亮点（如 "低位底部震荡企稳，估值处于历史10%分位"）
+- level: 爆发确定性（"高" / "中"）
+- risk_warning: ≤50 字的风控与撤退纪律（何时应认错撤退）
 
 【输出 schema（严格 JSON）】
 {{
   "discoveries": [
-    {{"sector": "...", "logic": "...", "stocks": [{{"code": "sh600xxx", "name": "..."}}, ...], "level": "高"}},
-    {{"sector": "...", "logic": "...", "stocks": [{{"code": "sz000xxx", "name": "..."}}, ...], "level": "中"}},
-    {{"sector": "...", "logic": "...", "stocks": [{{"code": "sh688xxx", "name": "..."}}, ...], "level": "中"}}
+    {{
+      "sector": "方向名称",
+      "ambush_type": "政策催化左侧潜伏",
+      "catalyst_window": "未来 1-3 个交易日",
+      "catalyst_logic": "前瞻催化与预期差分析...",
+      "technical_pattern": "底部均线粘合，缩量震荡蓄势...",
+      "stocks": [
+        {{
+          "code": "sh600xxx",
+          "name": "股票名",
+          "current_price": 12.50,
+          "ambush_zone": [12.20, 12.60],
+          "target_win": 14.50,
+          "stop_loss": 11.80,
+          "stock_logic": "低位年线支撑+缩量回踩企稳"
+        }}
+      ],
+      "level": "高",
+      "risk_warning": "若跌破XX元支撑位或催化落空则止损离场"
+    }}
   ]
 }}
 
 注意：
-1. code 必须是带 sh/sz/bj 前缀的合法 A 股代码（从涨幅榜/成交量榜里挑）
-2. sector 板块名要从资金流向数据里挑，不要凭空创造
-3. logic 必须有 1 条消息 + 1 条技术证据，不能只空喊题材
-4. level 高 = 资金+消息+股价 三角共振；中 = 只有 2 个维度共振
-5. 找不到共振时 discoveries 可少于 3 个（不要凑数）
+1. 标的必须从提供的低位蓄势池或主线关联池中挑选真实的 A 股代码
+2. 严禁推荐已连板大涨追高的股票，必须聚焦于低位买点
+3. ambush_zone 必须包含当前价附近或略下方支撑位，形成合理低吸区间
 
 请直接输出 JSON："""
 
 
 def _normalize_6digit(code: str) -> str:
-    """6 位纯数字 → 带 sh/sz/bj 前缀的 A 股代码。
-
-    复用 market_fetcher 的归一化规则（延迟 import 避免循环依赖）：
-      6/9/5 → sh, 0/3 → sz, 4/8 → bj
-    """
+    """6 位纯数字 → 带 sh/sz/bj 前缀的 A 股代码。"""
     if not re.match(r"^\d{6}$", code):
         return code
     try:
@@ -529,41 +550,40 @@ def _normalize_6digit(code: str) -> str:
 
 
 def build_discover_messages(
-    gainers: list[dict],
-    volume: list[dict],
+    low_accum: list[dict],
+    momentum: list[dict],
     sectors: list[dict],
     news: list[dict],
 ) -> list[dict]:
     """打包 discover 用的 messages。"""
-    def _fmt_gainers() -> str:
+    def _fmt_low_accum() -> str:
         return "\n".join(
-            f"- {(g.get('name') or g.get('code'))} ({g.get('code')}): "
-            f"+{g.get('change_pct', 0):.2f}%"
-            for g in gainers
+            f"- {(s.get('name') or s.get('code'))} ({s.get('code')}): "
+            f"现价 ¥{s.get('price', 0):.2f}, 涨跌 {s.get('change_pct', 0):+.2f}%, "
+            f"成交量 {int(s.get('volume', 0)):,}股"
+            for s in low_accum[:35]
         )
 
-    def _fmt_volume() -> str:
+    def _fmt_momentum() -> str:
         return "\n".join(
-            f"- {(v.get('name') or v.get('code'))} ({v.get('code')}): "
-            f"{int(v.get('volume', 0)):,}手, "
-            f"涨跌 {v.get('change_pct', 0):+.2f}%"
-            for v in volume
+            f"- {(m.get('name') or m.get('code'))} ({m.get('code')}): "
+            f"+{m.get('change_pct', 0):.2f}%"
+            for m in momentum[:20]
         )
 
     def _fmt_sectors() -> str:
         return "\n".join(
-            f"- {s.get('name')}: 净额 {s.get('net_amount', 0):+.2f}亿, "
+            f"- {s.get('name')}: 净流入 {s.get('net_amount', 0):+.2f}亿, "
             f"领涨 {s.get('leading_stock') or '-'} "
             f"({s.get('leading_change_pct', 0):+.2f}%), "
             f"板块涨跌 {s.get('change_pct', 0):+.2f}%"
-            for s in sectors
+            for s in sectors[:15]
         )
 
     def _fmt_news() -> str:
         lines: list[str] = []
-        for n in news:
+        for n in news[:40]:
             t = n.get("time", "") or "?"
-            # 只显示 HH:MM:SS
             if "T" in t:
                 t = t.split("T", 1)[1][:8]
             title = n.get("title") or n.get("content", "")[:80]
@@ -575,8 +595,8 @@ def build_discover_messages(
         {
             "role": "user",
             "content": DISCOVER_USER_PROMPT.format(
-                n_gainers=len(gainers), gainers_block=_fmt_gainers(),
-                n_volume=len(volume), volume_block=_fmt_volume(),
+                low_accum_block=_fmt_low_accum(),
+                momentum_block=_fmt_momentum(),
                 n_sectors=len(sectors), sectors_block=_fmt_sectors(),
                 n_news=len(news), news_block=_fmt_news(),
             ),
@@ -586,42 +606,29 @@ def build_discover_messages(
 
 def _sanitize_discoveries(
     raw: dict,
-    gainers: list[dict],
-    volume: list[dict],
+    all_valid_codes: dict[str, str],
 ) -> dict:
-    """清洗 LLM 返回的 discover JSON。
-
-    严格性:
-    - code 必须匹配 sh/sz/bj + 6 位数字（白名单）
-    - 6 位纯数字自动补前缀
-    - 每个方向的 stocks 必须**严格从 gainers/volume 里挑**（不在白名单内的 code 丢弃）
-      这是为了让前端【可点击个股 → 弹 K线图】的联动能 100% 落地
-    - 至少要有 1 只合法 stock 才保留该方向
-    """
+    """清洗 LLM 返回的前瞻埋伏 discover JSON。"""
     if not isinstance(raw, dict):
         raw = {}
-
-    # 白名单：所有出现过的合法 code
-    known_codes: dict[str, str] = {}  # code -> name
-    for src in (gainers, volume):
-        for s in src:
-            c = (s.get("code") or "").lower()
-            if re.match(r"^(sh|sz|bj)\d{6}$", c):
-                known_codes[c] = s.get("name") or c
 
     raw_list = raw.get("discoveries", []) or []
     if not isinstance(raw_list, list):
         raw_list = []
 
     out: list[dict] = []
-    for d in raw_list[:5]:  # 至多 5 个方向（前端展示 3 个，留余量）
+    for d in raw_list[:5]:
         if not isinstance(d, dict):
             continue
-        sector = str(d.get("sector", "")).strip()[:50] or "未知方向"
-        logic = str(d.get("logic", "")).strip()[:500]
+        sector = str(d.get("sector", "")).strip()[:50] or "前瞻埋伏方向"
+        ambush_type = str(d.get("ambush_type", "")).strip()[:30] or "政策与拐点低吸"
+        catalyst_window = str(d.get("catalyst_window", "")).strip()[:30] or "未来 1-3 个交易日"
+        catalyst_logic = str(d.get("catalyst_logic", "")).strip()[:500] or str(d.get("logic", "")).strip()[:500]
+        technical_pattern = str(d.get("technical_pattern", "")).strip()[:300] or "低位蓄势企稳"
+        risk_warning = str(d.get("risk_warning", "")).strip()[:200] or "破位关键支撑线应严格止损"
         level = str(d.get("level", "")).strip()
         if level not in ("高", "中", "低"):
-            level = "中"
+            level = "高"
 
         # 清洗 stocks
         raw_stocks = d.get("stocks", []) or []
@@ -629,83 +636,121 @@ def _sanitize_discoveries(
             raw_stocks = []
         stocks: list[dict] = []
         seen_codes: set[str] = set()
+
         for s in raw_stocks[:5]:
             if not isinstance(s, dict):
                 continue
             code_raw = str(s.get("code", "")).strip().lower()
             name = str(s.get("name", "")).strip()[:20]
-            # 6 位纯数字自动补前缀
             if re.match(r"^\d{6}$", code_raw):
                 code_raw = _normalize_6digit(code_raw)
-            # 严格校验
             if not re.match(r"^(sh|sz|bj)\d{6}$", code_raw):
-                logger.warning("discover drop invalid code: %r (sector=%s)", code_raw, sector)
-                continue
-            # 白名单校验: 必须从 gainers/volume 里出现过
-            if code_raw not in known_codes:
-                logger.warning(
-                    "discover drop code not in whitelist: %r (sector=%s)",
-                    code_raw, sector,
-                )
                 continue
             if code_raw in seen_codes:
                 continue
             seen_codes.add(code_raw)
+
             # name 兜底
-            if not name:
-                name = known_codes[code_raw]
-            stocks.append({"code": code_raw, "name": name})
+            if not name and code_raw in all_valid_codes:
+                name = all_valid_codes[code_raw]
+
+            # 价格与买点区间
+            cur_price = s.get("current_price")
+            try:
+                cur_price = float(cur_price) if cur_price is not None else None
+            except Exception:
+                cur_price = None
+
+            ambush_zone = s.get("ambush_zone")
+            zone_out = None
+            if isinstance(ambush_zone, list) and len(ambush_zone) >= 2:
+                try:
+                    z0, z1 = float(ambush_zone[0]), float(ambush_zone[1])
+                    zone_out = [min(z0, z1), max(z0, z1)]
+                except Exception:
+                    pass
+
+            target_win = None
+            if s.get("target_win") is not None:
+                try: target_win = round(float(s["target_win"]), 2)
+                except Exception: pass
+
+            stop_loss = None
+            if s.get("stop_loss") is not None:
+                try: stop_loss = round(float(s["stop_loss"]), 2)
+                except Exception: pass
+
+            stock_logic = str(s.get("stock_logic", "")).strip()[:100] or "低位蓄势，具备爆发弹性"
+
+            stocks.append({
+                "code": code_raw,
+                "name": name or code_raw,
+                "current_price": cur_price,
+                "ambush_zone": zone_out,
+                "target_win": target_win,
+                "stop_loss": stop_loss,
+                "stock_logic": stock_logic,
+            })
 
         if not stocks:
-            logger.warning("discover drop sector without valid stock: %s", sector)
             continue
 
         out.append({
             "sector": sector,
-            "logic": logic,
+            "ambush_type": ambush_type,
+            "catalyst_window": catalyst_window,
+            "catalyst_logic": catalyst_logic,
+            "technical_pattern": technical_pattern,
             "stocks": stocks,
             "level": level,
+            "risk_warning": risk_warning,
         })
 
     return {
-        "discoveries": out[:3],  # 最终保留 3 个
+        "discoveries": out[:3],
         "model": config.LLM_MODEL_NAME,
     }
 
 
 async def generate_discover(
-    gainers: list[dict],
-    volume: list[dict],
+    low_accum: list[dict],
+    momentum: list[dict],
     sectors: list[dict],
     news: list[dict],
+    all_valid_codes: dict[str, str] | None = None,
 ) -> dict:
-    """v4.1: AI 共振挖掘 — 给定技术+消息面数据，输出 3 个最值得关注的板块方向。
+    """v4.1+: AI 前瞻 Alpha 掘金 — 基于催化预期差与低位形态，发掘 3 个最佳埋伏方向。
 
     Returns:
         dict: {
-            "discoveries": [{"sector", "logic", "stocks": [{"code", "name"}], "level"}, ...],
+            "discoveries": [
+                {
+                    "sector": str,
+                    "ambush_type": str,
+                    "catalyst_window": str,
+                    "catalyst_logic": str,
+                    "technical_pattern": str,
+                    "stocks": [{"code", "name", "current_price", "ambush_zone", "target_win", "stop_loss", "stock_logic"}],
+                    "level": str,
+                    "risk_warning": str,
+                }, ...
+            ],
             "model": str,
         }
-
-    错误处理:
-    - LLM 未配置 → RuntimeError（让 router 返 503）
-    - 网络错误 → 透传原 openai 异常（让 router 返 502）
-    - JSON 解析失败 → 走 _parse_plan_json 三重兜底
-    - 没有合法 discoveries → 返回空列表（router 返 200 但 discoveries=[]）
     """
     client = _get_client()
-    messages = build_discover_messages(gainers, volume, sectors, news)
+    messages = build_discover_messages(low_accum, momentum, sectors, news)
     logger.info(
-        "calling LLM (discover): model=%s gainers=%d volume=%d sectors=%d news=%d",
-        config.LLM_MODEL_NAME, len(gainers), len(volume), len(sectors), len(news),
+        "calling LLM (discover): model=%s low_accum=%d momentum=%d sectors=%d news=%d",
+        config.LLM_MODEL_NAME, len(low_accum), len(momentum), len(sectors), len(news),
     )
 
     try:
         resp = await client.chat.completions.create(
             model=config.LLM_MODEL_NAME,
             messages=messages,
-            temperature=0.6,  # 比规划稍高（要敢想敢推）
-            max_tokens=2000,
+            temperature=0.6,  # 适度发散，捕捉预期差
+            max_tokens=2200,
             response_format={"type": "json_object"},
         )
     except Exception as e:
@@ -716,11 +761,11 @@ async def generate_discover(
             model=config.LLM_MODEL_NAME,
             messages=messages,
             temperature=0.6,
-            max_tokens=2000,
+            max_tokens=2200,
         )
 
     content = _first_choice_text(resp)
     logger.info("discover raw content: %s", content[:300])
 
     raw = _parse_plan_json(content)
-    return _sanitize_discoveries(raw, gainers=gainers, volume=volume)
+    return _sanitize_discoveries(raw, all_valid_codes=all_valid_codes or {})

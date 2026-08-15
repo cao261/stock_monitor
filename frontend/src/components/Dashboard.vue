@@ -586,7 +586,7 @@ onUnmounted(() => {
       @close="aiModal.show = false"
     />
 
-    <!-- 4. Alpha 共振挖掘 -->
+    <!-- 4. 前瞻 Alpha 掘金（低位埋伏与事件驱动） -->
     <AlphaDiscoverModal
       :show="alphaModal.show"
       :loading="alphaModal.loading"
@@ -596,6 +596,7 @@ onUnmounted(() => {
       @close="alphaModal.show = false"
       @refresh="openAlphaDiscoverModal"
       @open-chart="openChartModal"
+      @add-to-watchlist="handleAddWatchlist"
     />
 
     <!-- 5. AI 智能规划确认 -->

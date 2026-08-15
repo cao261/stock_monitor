@@ -311,19 +311,21 @@ async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
 
 
 # ====================== v4.1: AI 共振挖掘（Alpha Discovery）======================
+# ====================== v4.1: AI 前瞻 Alpha 掘金（低位埋伏与拐点发现）======================
 @router.get(
     "/discover",
-    summary="v4.1 Alpha 共振挖掘（技术面 + 消息面融合 → 3 个短线方向）",
+    summary="v4.1 前瞻 Alpha 掘金（催化预期差 + 低位蓄势 → 3 大埋伏方向）",
 )
 async def discover() -> dict:
-    """v4.1: AI 共振挖掘 — 找 3 个『技术面资金/放量 + 消息面利好』共振板块。
+    """前瞻 Alpha 掘金 — 寻找未来 1-5 天具备爆发潜力的【低位埋伏 / 拐点爆发】方向。
 
     数据组装:
-    - 技术面: 涨幅 Top 30 + 成交量 Top 30 (from all_stocks_cache)
-    - 资金流: 净流入 Top 20 板块 (from fund_flow_cache)
-    - 消息面: 最近 50 条快讯 (from news_fetcher cache, 10min 缓存)
+    - 低位蓄势池: 涨幅尚温和 (-2%~+3.8%) 且有活跃成交的底部/震荡标的 (from all_stocks_cache)
+    - 领涨参考池: 今日市场主线与领涨先锋 (from all_stocks_cache)
+    - 资金流向池: 主力净流入 Top 20 板块 (from fund_flow_cache)
+    - 消息催化池: 最近 24 小时核心快讯与政策催化 (from news_fetcher)
 
-    调 LLM 输出 3 个最值得短线关注的方向（含代表个股）。
+    调 LLM 输出 3 个最值得在低位逢低埋伏的方向（含建议买点区间、目标位与防守止损）。
     """
     if not config.LLM_ENABLED:
         raise HTTPException(
@@ -331,8 +333,33 @@ async def discover() -> dict:
             detail="LLM 未启用。请在项目根目录的 .env 里设置 LLM_API_KEY。",
         )
 
-    # ===== 1. 技术面：涨幅 Top 30 + 成交 Top 30 =====
     all_stocks = mf.get_all_stocks()
+
+    # 构建全市场合法代码字典 (code -> name)
+    all_valid_codes: dict[str, str] = {
+        c: d.get("name") or c
+        for c, d in all_stocks.items()
+    }
+
+    # ===== 1. 低位蓄势池：涨跌温和 (-2.0% ~ +3.8%)、成交活跃、适合埋伏 =====
+    low_accum_raw = [
+        {
+            "code": c,
+            "name": d.get("name", ""),
+            "change_pct": round(d.get("change_pct") or 0.0, 2),
+            "price": d.get("price"),
+            "volume": int(d.get("volume", 0)),
+        }
+        for c, d in all_stocks.items()
+        if d.get("price") and d.get("price") > 0
+        and d.get("change_pct") is not None
+        and -2.0 <= d["change_pct"] <= 3.8
+        and (d.get("volume") or 0) > 30000
+    ]
+    # 随机/均匀采样或按成交量适度排序取前 40 只
+    low_accum = sorted(low_accum_raw, key=lambda x: x["volume"], reverse=True)[:40]
+
+    # ===== 2. 今日主线与领涨先锋（供研判热点扩散与低位补涨关联）=====
     by_chg = sorted(
         (
             (c, d) for c, d in all_stocks.items()
@@ -341,48 +368,29 @@ async def discover() -> dict:
         key=lambda kv: kv[1]["change_pct"],
         reverse=True,
     )
-    gainers: list[dict] = [
+    momentum: list[dict] = [
         {
             "code": c,
             "name": d.get("name", ""),
             "change_pct": round(d["change_pct"], 2),
             "price": d.get("price"),
         }
-        for c, d in by_chg[:30]
+        for c, d in by_chg[:20]
     ]
 
-    by_vol = sorted(
-        (
-            (c, d) for c, d in all_stocks.items()
-            if d.get("volume") and d.get("volume", 0) > 0
-        ),
-        key=lambda kv: kv[1]["volume"],
-        reverse=True,
-    )
-    volume: list[dict] = [
-        {
-            "code": c,
-            "name": d.get("name", ""),
-            "volume": int(d.get("volume", 0)),
-            "change_pct": round(d.get("change_pct") or 0.0, 2),
-        }
-        for c, d in by_vol[:30]
-    ]
-
-    # ===== 2. 资金流：净流入 Top 20 板块 =====
+    # ===== 3. 资金流：主力净流入 Top 15 板块 =====
     fund_flow = mf.get_fund_flow()
     sectors_all = list(fund_flow.get("data", []))
     sectors = sorted(
         [s for s in sectors_all if s.get("net_amount", 0) > 0],
         key=lambda s: s.get("net_amount", 0.0),
         reverse=True,
-    )[:20]
+    )[:15]
 
-    # ===== 3. 消息面：news_fetcher 缓存（10 分钟有效）=====
+    # ===== 4. 消息面：news_fetcher 缓存（10 分钟有效）=====
     news_cache = news_fetcher.get_news()
     news = news_cache.get("data", [])
     if not news and not news_fetcher.is_news_cache_fresh():
-        # 缓存空且过期, 主动拉一次（前端在 loading 时等一下, 拿到最新数据）
         try:
             await news_fetcher.refresh_news()
             news_cache = news_fetcher.get_news()
@@ -391,7 +399,6 @@ async def discover() -> dict:
             logger.warning("/discover 主动拉新闻失败: %s", news_cache.get("error"))
 
     if not news:
-        # 兜底: 让前端能拿到 error 字段做提示
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -400,10 +407,14 @@ async def discover() -> dict:
             ),
         )
 
-    # ===== 4. 调 LLM =====
+    # ===== 5. 调 LLM 前瞻埋伏决策 =====
     try:
         result = await llm.generate_discover(
-            gainers=gainers, volume=volume, sectors=sectors, news=news,
+            low_accum=low_accum,
+            momentum=momentum,
+            sectors=sectors,
+            news=news,
+            all_valid_codes=all_valid_codes,
         )
     except Exception as e:
         logger.exception("discover LLM call failed")
@@ -416,10 +427,9 @@ async def discover() -> dict:
         "discoveries": result["discoveries"],
         "model": result["model"],
         "generated_at": datetime.now().isoformat(timespec="seconds"),
-        # 附带元信息（前端 Modal 可展示"基于 X 条新闻 / Y 只异动股"）
         "meta": {
-            "gainers_count": len(gainers),
-            "volume_count": len(volume),
+            "low_accum_count": len(low_accum),
+            "momentum_count": len(momentum),
             "sectors_count": len(sectors),
             "news_count": len(news),
             "news_source": news_cache.get("source"),
