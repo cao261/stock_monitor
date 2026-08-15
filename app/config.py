@@ -39,4 +39,5 @@ LLM_MODEL_NAME: str = os.environ.get("LLM_MODEL_NAME", "gpt-3.5-turbo").strip()
 #   月之暗面: moonshot-v1-8k
 #   智谱 GLM: glm-4-flash / glm-4
 LLM_ENABLED: bool = bool(LLM_API_KEY)
-LLM_TIMEOUT_SECONDS: float = float(os.environ.get("LLM_TIMEOUT_SECONDS", "45"))
+# v4.3: 45 -> 120, thinking model (如 MiniMax M2.7) 思考慢, 旧值易触发超时降级
+LLM_TIMEOUT_SECONDS: float = float(os.environ.get("LLM_TIMEOUT_SECONDS", "120"))

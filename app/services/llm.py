@@ -360,7 +360,8 @@ async def generate_report(summary: dict) -> str:
         model=config.LLM_MODEL_NAME,
         messages=messages,
         temperature=0.7,
-        max_tokens=1500,
+        # v4.3: 1500 -> 2500, 给 thinking model 留余量
+        max_tokens=2500,
     )
     return _first_choice_text(resp)
 
@@ -376,12 +377,26 @@ _JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
 def _parse_plan_json(content: str) -> dict:
     """鲁棒解析 LLM 输出的 JSON 计划。
 
+    v4.3+ 适配 thinking model（如 MiniMax M2.7）：
+    - 自动剥离 ``<think>...</think>`` 块（thinking model 输出在 JSON 前的思考过程）
+    - 再走原 3 重 fallback（直接 json / ```json 块 / 首末 {} 抠）
+
     Returns:
         dict: 解析后的 JSON；解析失败返回空 dict（不抛异常，由调用方决定如何处理）
     """
     if not content:
         return {}
     content = content.strip()
+
+    # v4.3 兼容 thinking model: 剥离 ``<think>...</think>`` 块（包括跨行）
+    #   例如 MiniMax M2.7 / DeepSeek-reasoner 等会输出 <think>...思考过程...</think>
+    #   然后才是真正的 JSON
+    think_re = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+    content_no_think = think_re.sub("", content).strip()
+    if content_no_think != content:
+        logger.debug("stripped think block, content shrunk from %d to %d chars", len(content), len(content_no_think))
+        content = content_no_think
+
     # 1) 直接解析
     try:
         return json.loads(content)
@@ -606,7 +621,8 @@ async def generate_ai_plan(
         model=config.LLM_MODEL_NAME,
         messages=messages,
         temperature=0.5,
-        max_tokens=800,
+        # v4.3: 800 -> 2000, thinking model 留余量
+        max_tokens=2000,
         response_format={"type": "json_object"},
     )
 
@@ -1320,7 +1336,8 @@ async def generate_discover(
             model=config.LLM_MODEL_NAME,
             messages=messages,
             temperature=0.6,
-            max_tokens=2200,
+            # v4.3: 2200 -> 4000, discover 输出包含 3 个 discovery + 35 stocks + tech_indicators + news_highlights, thinking model 必须留余量
+            max_tokens=4000,
             response_format={"type": "json_object"},
         )
         content = _first_choice_text(resp)
