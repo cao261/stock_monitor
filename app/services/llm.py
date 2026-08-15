@@ -12,6 +12,8 @@ import asyncio
 import json
 import logging
 import re
+from datetime import datetime
+from pathlib import Path
 
 import openai
 
@@ -1336,11 +1338,31 @@ async def generate_discover(
             model=config.LLM_MODEL_NAME,
             messages=messages,
             temperature=0.6,
-            # v4.3: 2200 -> 4000, discover 输出包含 3 个 discovery + 35 stocks + tech_indicators + news_highlights, thinking model 必须留余量
-            max_tokens=4000,
+            # v4.3 第二次调整: 4000 -> 6000, 实测 M2.7 think 块 + JSON 总 4414 tokens, 4000 不够
+            max_tokens=6000,
             response_format={"type": "json_object"},
         )
         content = _first_choice_text(resp)
+        # v4.3 调试: 把完整 raw content dump 到文件, 方便排查 thinking model 解析失败问题
+        try:
+            from pathlib import Path
+            dump_dir = Path(config.DATA_DIR) / "_debug_llm"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            (dump_dir / f"discover_{ts}.txt").write_text(
+                f"=== length: {len(content)} ===\n"
+                f"=== finish_reason: {resp.choices[0].finish_reason} ===\n"
+                f"=== usage: {resp.usage.model_dump() if resp.usage else None} ===\n"
+                f"=== content ===\n{content}\n",
+                encoding="utf-8",
+            )
+            # 只保留最近 5 个文件
+            dumps = sorted(dump_dir.glob("discover_*.txt"), key=lambda p: p.stat().st_mtime)
+            for old in dumps[:-5]:
+                try: old.unlink()
+                except Exception: pass
+        except Exception as dump_err:
+            logger.warning("dump llm content failed: %r", dump_err)
         logger.info("discover raw content: %s", content[:300])
         raw = _parse_plan_json(content)
     except Exception as e:

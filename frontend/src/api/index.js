@@ -8,8 +8,8 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: '/api',
-  // v4.3: 60s -> 120s, thinking model (MiniMax M2.7) 思考慢 + discover 任务输出大, 60s 不够
-  timeout: 120000,
+  // v4.3 第二次调整: 120s -> 180s, 实测 M2.7 单次响应 113s, 120s 不够
+  timeout: 180000,
   headers: {
     'Content-Type': 'application/json',
   },
