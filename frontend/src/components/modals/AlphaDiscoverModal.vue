@@ -12,14 +12,28 @@ const props = defineProps({
 const emit = defineEmits(['close', 'refresh', 'open-chart', 'add-to-watchlist'])
 
 const LOADING_STEPS = [
-  '正在扫描 7x24 政策催化与重磅行业事件驱动日程…',
-  '正在全市场 5,000+ 标的中筛选底部蓄势与缩量企稳标的…',
-  '正在推演具备爆发预期差的低位买点甜区、支撑压力与综合评分…',
+  '正在扫描 390 个概念板块：资金流向、60日涨幅、回撤与止跌结构…',
+  '正在拉取板块指数历史K线，计算 MA20/MA60 粘合与量能收缩…',
+  '正在匹配 7x24 快讯催化，推演左侧埋伏预期差与右侧启动信号…',
 ]
 
 function fmtPrice(v) {
   if (v == null || isNaN(v)) return '--'
   return Number(v).toFixed(2)
+}
+
+function fmtSigned(v) {
+  if (v == null || isNaN(v)) return '--'
+  const n = Number(v)
+  return (n >= 0 ? '+' : '') + n.toFixed(1)
+}
+
+function fmtAmount(v) {
+  if (v == null || isNaN(v) || v <= 0) return '--'
+  const n = Number(v)
+  if (n >= 1e8) return (n / 1e8).toFixed(0) + '亿'
+  if (n >= 1e4) return (n / 1e4).toFixed(0) + '万'
+  return n.toFixed(0)
 }
 
 function getScoreBadgeClass(score) {
@@ -54,7 +68,7 @@ function hasDetail(item) {
       <div class="p-3.5 bg-[#131c2e] border-b border-slate-700 flex items-center justify-between">
         <div class="flex items-center gap-2.5">
           <span class="text-sm font-bold text-purple-300 flex items-center gap-1.5">
-            🔭 前瞻 Alpha 掘金 · 低位埋伏与事件驱动决策矩阵
+            🔭 前瞻 Alpha 掘金 · 板块级左侧埋伏（技术+资金+催化共振）
           </span>
           <span v-if="props.result?.model" class="text-[11px] font-mono px-1.5 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-800">
             {{ props.result.model }}
@@ -170,6 +184,30 @@ function hasDetail(item) {
               <div v-if="item.breakout_trigger" class="p-2 bg-blue-950/30 rounded border border-blue-900/40 flex items-start gap-1">
                 <span class="text-blue-300 font-semibold shrink-0">🚀 右侧质变信号:</span>
                 <span class="text-blue-200">{{ item.breakout_trigger }}</span>
+              </div>
+            </div>
+
+            <!-- v4.4: 板块指数级指标（60日涨幅/回撤/资金/成交） -->
+            <div v-if="item.sector_metrics" class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px] font-mono">
+              <div class="p-1.5 rounded bg-slate-950/50 border border-slate-800 flex flex-col items-center gap-0.5">
+                <span class="text-[10px] text-slate-500">板块60日涨幅</span>
+                <span :class="(item.sector_metrics.ret_60d ?? 0) >= 0 ? 'text-up' : 'text-down'">
+                  {{ fmtSigned(item.sector_metrics.ret_60d) }}%
+                </span>
+              </div>
+              <div class="p-1.5 rounded bg-slate-950/50 border border-slate-800 flex flex-col items-center gap-0.5">
+                <span class="text-[10px] text-slate-500">距60日高点</span>
+                <span class="text-down">{{ fmtSigned(item.sector_metrics.drawdown_pct) }}%</span>
+              </div>
+              <div class="p-1.5 rounded bg-slate-950/50 border border-slate-800 flex flex-col items-center gap-0.5">
+                <span class="text-[10px] text-slate-500">主力净额(当日)</span>
+                <span :class="(item.sector_metrics.net_amount ?? 0) >= 0 ? 'text-up' : 'text-down'">
+                  {{ fmtSigned(item.sector_metrics.net_amount) }}亿
+                </span>
+              </div>
+              <div class="p-1.5 rounded bg-slate-950/50 border border-slate-800 flex flex-col items-center gap-0.5">
+                <span class="text-[10px] text-slate-500">趋势 / 成交额</span>
+                <span class="text-slate-300">{{ item.sector_metrics.trend }} / {{ fmtAmount(item.sector_metrics.amount_last) }}</span>
               </div>
             </div>
 

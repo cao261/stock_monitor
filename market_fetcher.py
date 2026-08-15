@@ -547,6 +547,23 @@ def get_history(code: str) -> dict[str, Any]:
     return history_cache.get(code) or _empty_history()
 
 
+async def ensure_history_for_codes(
+    codes: list[str],
+    *,
+    min_records: int = 60,
+    concurrency: int = 4,
+) -> dict[str, dict[str, Any]]:
+    """Return cached history and fetch only symbols lacking a usable K-line window."""
+    unique_codes = list(dict.fromkeys(codes))
+    missing = [
+        code for code in unique_codes
+        if len((history_cache.get(code) or {}).get("data") or []) < min_records
+    ]
+    if missing:
+        await fetch_history_for_codes(missing, concurrency=concurrency)
+    return {code: get_history(code) for code in unique_codes}
+
+
 def get_history_meta() -> dict[str, Any]:
     return {
         "size": len(history_cache),

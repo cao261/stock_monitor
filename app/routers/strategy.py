@@ -311,122 +311,27 @@ async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
 
 
 # ====================== v4.1: AI 共振挖掘（Alpha Discovery）======================
-# ====================== v4.1: AI 前瞻 Alpha 掘金（低位埋伏与拐点发现）======================
+# ====================== v4.4: 升级为【板块级左侧埋伏挖掘】======================
+# 旧版（v4.1）在"全市场个股"里按成交量预选 + 低波动打分，结果天然偏向
+# 工商银行这类低波动横盘蓝筹（无题材、无弹性、无埋伏价值）。v4.4 改为：
+#   1. 板块池 = A 股概念题材（同花顺 375 + 东财资金流 387，按名称 join）
+#      —— "银行/证券"行业不在池里，从源头杜绝伪候选
+#   2. 板块指数真实 K 线算技术面（60日涨幅/回撤/均线粘合/量能收缩/止跌）
+#   3. 消息面为自上而下的挖掘入口：新闻密集但板块未涨 = 预期差
+#   4. 左侧纪律硬过滤：追涨（60日>25%）、下降未止跌、单日过热、死水、无催化出逃
 @router.get(
     "/discover",
-    summary="v4.1 前瞻 Alpha 掘金（催化预期差 + 低位蓄势 → 3 大埋伏方向）",
+    summary="v4.4 板块级前瞻 Alpha 掘金（左侧埋伏：技术+资金+催化共振）",
 )
 async def discover() -> dict:
-    """前瞻 Alpha 掘金 — 寻找未来 1-5 天具备爆发潜力的【低位埋伏 / 拐点爆发】方向。
-
-    数据组装:
-    - 低位蓄势池: 涨幅尚温和 (-2%~+3.8%) 且有活跃成交的底部/震荡标的 (from all_stocks_cache)
-    - 领涨参考池: 今日市场主线与领涨先锋 (from all_stocks_cache)
-    - 资金流向池: 主力净流入 Top 20 板块 (from fund_flow_cache)
-    - 消息催化池: 最近 24 小时核心快讯与政策催化 (from news_fetcher)
-
-    调 LLM 输出 3 个最值得在低位逢低埋伏的方向（含建议买点区间、目标位与防守止损）。
-    """
-    if not config.LLM_ENABLED:
+    """板块级左侧埋伏挖掘；板块数据不可用时降级到 v4.1 个股引擎。"""
+    all_stocks = mf.get_all_stocks()
+    if not all_stocks or len(all_stocks) < 50:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="LLM 未启用。请在项目根目录的 .env 里设置 LLM_API_KEY。",
+            detail="全市场实时行情尚未就绪，请等待行情缓存刷新后重试。",
         )
 
-    all_stocks = mf.get_all_stocks()
-
-    # 如果内存全量快照为空（如冷启动），从本地清单加载
-    if not all_stocks or len(all_stocks) < 50:
-        all_codes = mf.fetch_all_codes_sync()
-        for it in all_codes:
-            sym = it.get("code")
-            nm = it.get("name")
-            if sym and sym not in all_stocks:
-                all_stocks[sym] = {"name": nm, "price": None, "change_pct": 0.0, "volume": 50000}
-
-    # 构建全市场合法代码字典 (code -> name)
-    all_valid_codes: dict[str, str] = {
-        c: d.get("name") or c
-        for c, d in all_stocks.items()
-    }
-
-    # ===== 1. 低位蓄势池：涨跌温和 (-2.0% ~ +3.8%)、成交活跃、适合埋伏 =====
-    from analyzer import calculate_stock_ambush_levels
-    low_accum_raw = [
-        {
-            "code": c,
-            "name": d.get("name", ""),
-            "change_pct": round(d.get("change_pct") or 0.0, 2),
-            "price": d.get("price") or 10.0,
-            "volume": int(d.get("volume", 0)),
-        }
-        for c, d in all_stocks.items()
-        if d.get("change_pct") is not None
-        and -2.0 <= d["change_pct"] <= 3.8
-    ]
-    if not low_accum_raw:
-        low_accum_raw = [
-            {"code": c, "name": d.get("name", ""), "change_pct": 0.5, "price": 12.0, "volume": 80000}
-            for c, d in list(all_stocks.items())[:40]
-        ]
-    sorted_candidates = sorted(low_accum_raw, key=lambda x: x["volume"], reverse=True)[:35]
-    
-    # 注入精准技术面指标（支撑位、阻力位、ATR波动率）
-    low_accum = []
-    for cand in sorted_candidates:
-        c_code = cand["code"]
-        c_price = cand["price"]
-        tech = calculate_stock_ambush_levels(c_code, cur_price=c_price)
-        low_accum.append({
-            **cand,
-            "support_price": tech["support_price"],
-            "support_name": tech["support_name"],
-            "resistance_price": tech["resistance_price"],
-            "resistance_name": tech["resistance_name"],
-            "volatility_tag": tech["volatility_tag"],
-            "technical_basis": tech["technical_basis"],
-            "ambush_zone": tech["ambush_zone"],
-            "target_win": tech["target_win"],
-            "stop_loss": tech["stop_loss"],
-        })
-
-    # ===== 2. 今日主线与领涨先锋（供研判热点扩散与低位补涨关联）=====
-    by_chg = sorted(
-        (
-            (c, d) for c, d in all_stocks.items()
-            if d.get("change_pct") is not None
-        ),
-        key=lambda kv: kv[1]["change_pct"],
-        reverse=True,
-    )
-    momentum: list[dict] = [
-        {
-            "code": c,
-            "name": d.get("name", ""),
-            "change_pct": round(d["change_pct"], 2),
-            "price": d.get("price") or 15.0,
-        }
-        for c, d in by_chg[:20]
-    ] if by_chg else low_accum[:20]
-
-    # ===== 3. 资金流：主力净流入 Top 15 板块 =====
-    fund_flow = mf.get_fund_flow()
-    sectors_all = list(fund_flow.get("data", []))
-    sectors = sorted(
-        [s for s in sectors_all if s.get("net_amount", 0) > 0],
-        key=lambda s: s.get("net_amount", 0.0),
-        reverse=True,
-    )[:15]
-    if not sectors:
-        # 兜底主流核心板块
-        sectors = [
-            {"name": "半导体与算力硬件", "net_amount": 18.5, "leading_stock": "中芯国际", "leading_change_pct": 3.2, "change_pct": 1.5},
-            {"name": "低空经济与商业航天", "net_amount": 12.8, "leading_stock": "中信海直", "leading_change_pct": 4.1, "change_pct": 1.8},
-            {"name": "人形机器人与高端母机", "net_amount": 9.6, "leading_stock": "绿的谐波", "leading_change_pct": 2.9, "change_pct": 1.2},
-            {"name": "固态电池与储能设备", "net_amount": 8.2, "leading_stock": "宁德时代", "leading_change_pct": 2.1, "change_pct": 0.9},
-        ]
-
-    # ===== 4. 消息面：news_fetcher 缓存（10 分钟有效）=====
     news_cache = news_fetcher.get_news()
     news = news_cache.get("data", [])
     if not news and not news_fetcher.is_news_cache_fresh():
@@ -435,44 +340,63 @@ async def discover() -> dict:
             news_cache = news_fetcher.get_news()
             news = news_cache.get("data", [])
         except Exception:
-            logger.warning("/discover 主动拉新闻失败: %s", news_cache.get("error"))
+            logger.warning("/discover news refresh failed", exc_info=True)
 
-    if not news:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                f"消息面数据暂不可用（{news_cache.get('error') or '暂无快讯'}）。"
-                "请稍后重试，或检查网络。"
-            ),
-        )
+    # ===== v4.4 主路径：板块级引擎 =====
+    from app.services import sector_alpha
+    built = await sector_alpha.build_sector_candidates(all_stocks, news)
+    if built["sectors"]:
+        result = await llm.generate_sector_discover(built["sectors"], news)
+        return {
+            **result,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "meta": {
+                "engine_level": "sector",
+                "pool_size": built["pool_size"],
+                "prescreened": built["prescreened"],
+                "index_ready": built["index_ready"],
+                "rejected": built["rejected"],
+                "candidate_count": len(built["sectors"]),
+                "news_count": len(news),
+                "news_source": news_cache.get("source"),
+                "news_fetched_at": news_cache.get("fetched_at"),
+                "news_error": news_cache.get("error"),
+            },
+        }
 
-    # ===== 5. 调 LLM 前瞻埋伏决策 =====
-    try:
-        result = await llm.generate_discover(
-            low_accum=low_accum,
-            momentum=momentum,
-            sectors=sectors,
-            news=news,
-            all_valid_codes=all_valid_codes,
-        )
-    except Exception as e:
-        logger.exception("discover LLM call failed")
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI 挖掘调用失败：{e}",
-        ) from e
+    # ===== v4.1 降级路径：个股引擎（板块数据不可用/无候选时） =====
+    from app.services.alpha_discovery import build_quantitative_candidates, preselect_codes
+    candidate_codes = preselect_codes(all_stocks)
+    histories = await mf.ensure_history_for_codes(candidate_codes, min_records=60, concurrency=4)
+    candidates, rejected = build_quantitative_candidates(all_stocks, histories, target_count=5)
+    if not candidates:
+        return {
+            "discoveries": [],
+            "engine_type": "quantitative",
+            "engine_name": "⚡ 量化低位筛选",
+            "engine_desc": "板块引擎与个股引擎均未产出满足左侧纪律的候选。",
+            "model": None,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "meta": {
+                "engine_level": "fallback_stock",
+                "preselected_count": len(candidate_codes),
+                "rejected": rejected,
+                "degraded_reason": "no_sector_candidates",
+            },
+        }
 
+    result = await llm.generate_discover(
+        candidates=candidates,
+        news=news,
+    )
     return {
-        "discoveries": result["discoveries"],
-        "engine_type": result.get("engine_type", "ai"),
-        "engine_name": result.get("engine_name", "🤖 AI 深度前瞻研报"),
-        "engine_desc": result.get("engine_desc", "大模型前瞻推演"),
-        "model": result.get("model", config.LLM_MODEL_NAME),
+        **result,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "meta": {
-            "low_accum_count": len(low_accum),
-            "momentum_count": len(momentum),
-            "sectors_count": len(sectors),
+            "engine_level": "fallback_stock",
+            "preselected_count": len(candidate_codes),
+            "candidate_count": len(candidates),
+            "rejected": rejected,
             "news_count": len(news),
             "news_source": news_cache.get("source"),
             "news_fetched_at": news_cache.get("fetched_at"),

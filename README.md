@@ -4,6 +4,40 @@ A local-first A-share (and ETF) real-time market sentiment dashboard with a
 glass-morphism dark UI. Single binary-style deployment: double-click `start.bat`
 and the browser opens automatically.
 
+## v4.4 — 板块级左侧埋伏挖掘引擎（Alpha Discover 重构）
+
+`/api/strategy/discover` 从"全市场个股筛选"重构为"概念板块左侧埋伏挖掘"。
+
+**为什么重构**：旧版在 5,500+ 个股里按成交量预选 + 低波动打分，结果天然偏向
+工商银行这类低波动横盘蓝筹——无题材、无弹性、无埋伏价值。v4.4 的板块池 =
+A 股概念题材（同花顺 375 + 东财资金流 387，按名称 join），"银行/证券"行业
+根本不在池里，从源头杜绝伪候选。
+
+**数据源**（均为免 key 免费接口，已验证可用）：
+- 同花顺概念板块列表 + 板块指数历史 K 线（`stock_board_concept_name_ths` /
+  `stock_board_concept_index_ths`，24h 磁盘缓存）
+- 东财概念资金流（`stock_fund_flow_concept("即时")`，后台 60s 刷新）
+- 7x24 快讯（news_fetcher 既有链路）
+
+**引擎管线**（`app/services/sector_alpha.py`）：
+1. 板块池 390 个概念题材 → 粗筛（资金方向 + 新闻热度，top 50）
+2. 拉候选板块指数 K 线 → 算技术面：60日涨幅 / 距60日高点回撤 / 区间位置 /
+   MA20-MA60 粘合 / 量能收缩比 / 止跌确认
+3. 消息面自上而下挖掘：板块名 ↔ 新闻标题关键词匹配（3 字滑窗防跨题材误匹配）
+4. 左侧纪律硬过滤：60日涨幅>25%（追涨）、下降趋势5日创新低（未止跌）、
+   当日涨跌>4%（过热）、日成交额<3亿（死水）、资金大幅出逃且无催化
+5. 五维打分（100 分）：左侧位置25 + 缩量止跌20 + 资金回流20 + 消息催化20 + 弹性结构15
+6. 板块近义去重（防 "TOPCON/钙钛矿/BC 电池" 同族重复输出）
+
+**个股落地**：每个板块取领涨股（+ 概念名匹配的温和放量股），复用
+`calculate_stock_ambush_levels` 算支撑/压力/低吸甜区/止盈止损。
+
+**LLM 角色**：只做催化注解——基于给定新闻证据提炼前瞻逻辑与预期差、
+给出右侧质变信号与风险纪律、在引擎股票池内补充个股注解。板块、评分、价位、
+新闻证据全部由引擎确定，模型禁止编造（清洗层强制校验 code/新闻归属）。
+
+**降级链**：板块引擎 → 个股引擎（v4.1 原逻辑，板块数据不可用或零候选时）。
+
 ## Highlights
 
 - **5,535 A-shares** + **ETFs** tracked in real-time (5s refresh)

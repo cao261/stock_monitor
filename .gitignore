@@ -74,3 +74,7 @@ _commit_msg_*.txt
 .env.*
 *.env
 !.env.example
+
+# v4.4: 板块指数K线磁盘缓存（运行时产物）
+app/data/
+data/_debug_llm/

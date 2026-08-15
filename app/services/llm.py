@@ -11,7 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
+import time
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -279,18 +282,59 @@ def build_plan_messages(
 
 
 # ====================== 4. 客户端工厂 ======================
-def _get_client() -> openai.AsyncOpenAI:
-    """每次新建一个 client（避免不同请求间共享状态；连接池照样复用底层 http）。"""
-    if not config.LLM_ENABLED:
-        raise RuntimeError(
-            "LLM 未启用：请在项目根目录的 .env 文件里设置 LLM_API_KEY。"
-            "参考 .env.example。"
-        )
+class _SlidingWindowLimiter:
+    """Process-local request limiter. Agnes accounts use a strict 20 RPM quota."""
+
+    def __init__(self, rpm: int, max_concurrency: int = 1) -> None:
+        self.rpm = max(1, rpm)
+        self._timestamps: deque[float] = deque()
+        self._lock = asyncio.Lock()
+        self._semaphore = asyncio.Semaphore(max(1, max_concurrency))
+        self._blocked_until = 0.0
+
+    async def acquire(self) -> None:
+        while True:
+            async with self._lock:
+                now = time.monotonic()
+                while self._timestamps and now - self._timestamps[0] >= 60:
+                    self._timestamps.popleft()
+                wait_for = max(0.0, self._blocked_until - now)
+                if not wait_for and len(self._timestamps) < self.rpm:
+                    self._timestamps.append(now)
+                    return
+                if not wait_for:
+                    wait_for = max(0.01, 60 - (now - self._timestamps[0]))
+            await asyncio.sleep(wait_for)
+
+    async def block_for(self, seconds: float) -> None:
+        async with self._lock:
+            self._blocked_until = max(self._blocked_until, time.monotonic() + max(0.0, seconds))
+
+
+_agnes_limiter = _SlidingWindowLimiter(config.AGNES_RPM, config.AGNES_MAX_CONCURRENCY)
+
+
+def _get_client(api_key: str | None = None, base_url: str | None = None) -> openai.AsyncOpenAI:
+    """Create a bounded-retry OpenAI-compatible client for one configured provider."""
+    key = (api_key if api_key is not None else config.LLM_API_KEY).strip()
+    url = (base_url if base_url is not None else config.LLM_BASE_URL).strip()
+    if not key:
+        raise RuntimeError("LLM 未启用：未配置可用的 API Key。")
     return openai.AsyncOpenAI(
-        api_key=config.LLM_API_KEY,
-        base_url=config.LLM_BASE_URL,
+        api_key=key,
+        base_url=url,
         timeout=config.LLM_TIMEOUT_SECONDS,
+        max_retries=0,
     )
+
+
+def _retry_after_seconds(error: Exception, fallback: float) -> float:
+    response = getattr(error, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    try:
+        return max(0.0, float(headers.get("retry-after", fallback)))
+    except (TypeError, ValueError):
+        return fallback
 
 
 # ====================== 5. 异步调用与 20 RPM 速率退避重试 ======================
@@ -301,44 +345,40 @@ async def _call_llm_with_retry(
     temperature: float = 0.6,
     max_tokens: int = 2000,
     response_format: dict | None = None,
-    max_retries: int = 3,
+    max_retries: int = 2,
+    limiter: _SlidingWindowLimiter | None = None,
 ):
-    """自动处理 20 RPM 等速率限制（HTTP 429 RateLimitError）及超时异常，带指数退避。"""
-    kwargs = {
-        "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": max_tokens,
-    }
+    """Bounded retry with proactive limiter and Retry-After aware backoff."""
+    kwargs = {"model": model, "messages": messages, "temperature": temperature, "max_tokens": max_tokens}
     if response_format:
         kwargs["response_format"] = response_format
 
     for attempt in range(1, max_retries + 1):
         try:
+            if limiter:
+                await limiter.acquire()
+                async with limiter._semaphore:
+                    return await client.chat.completions.create(**kwargs)
             return await client.chat.completions.create(**kwargs)
         except openai.RateLimitError as e:
             if attempt == max_retries:
-                logger.error("LLM rate limit reached 20 RPM max retries: %r", e)
                 raise
-            sleep_sec = 2.5 * attempt
-            logger.warning(
-                "LLM rate limited (429 / 20 RPM limit), attempt %d/%d, backoff sleeping %.1fs...",
-                attempt, max_retries, sleep_sec
-            )
+            sleep_sec = _retry_after_seconds(e, min(30.0, 3.0 * (2 ** (attempt - 1)))) + random.uniform(0, 0.5)
+            if limiter:
+                await limiter.block_for(sleep_sec)
+            logger.warning("LLM rate limited, attempt %d/%d; waiting %.1fs", attempt, max_retries, sleep_sec)
             await asyncio.sleep(sleep_sec)
         except openai.BadRequestError as e:
-            # 部分模型代理不支持 response_format="json_object"，降级重试
             if response_format and "response_format" in kwargs:
-                logger.warning("LLM response_format 不支持，自动降级为普通补全: %r", e)
+                logger.warning("LLM JSON mode unsupported; retrying without response_format: %r", e)
                 del kwargs["response_format"]
                 continue
             raise
-        except (openai.APITimeoutError, openai.APIConnectionError) as e:
+        except (openai.APITimeoutError, openai.APIConnectionError, openai.InternalServerError) as e:
             if attempt == max_retries:
-                logger.error("LLM connection timeout max retries: %r", e)
                 raise
-            sleep_sec = 1.5 * attempt
-            logger.warning("LLM connection/timeout error: %r, retrying in %.1fs...", e, sleep_sec)
+            sleep_sec = min(20.0, 2.0 * (2 ** (attempt - 1))) + random.uniform(0, 0.5)
+            logger.warning("LLM transient failure, attempt %d/%d; waiting %.1fs: %r", attempt, max_retries, sleep_sec, e)
             await asyncio.sleep(sleep_sec)
 
 
@@ -372,8 +412,10 @@ async def generate_report(summary: dict) -> str:
 # 三重 JSON 解析（鲁棒）：
 #   1. response_format=json_object 强制（如模型支持）
 #   2. 直接 json.loads
-#   3. 失败时从 ```json ... ``` 块里抠
-_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+#   3. 失败时从 ```json ... ``` 块里抠（对象 {..} 与数组 [..] 都支持）
+_JSON_BLOCK_RE = re.compile(
+    r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL
+)
 
 
 def _parse_plan_json(content: str) -> dict:
@@ -382,6 +424,10 @@ def _parse_plan_json(content: str) -> dict:
     v4.3+ 适配 thinking model（如 MiniMax M2.7）：
     - 自动剥离 ``<think>...</think>`` 块（thinking model 输出在 JSON 前的思考过程）
     - 再走原 3 重 fallback（直接 json / ```json 块 / 首末 {} 抠）
+
+    v4.4.1：```json 块与首末抠取同时支持【数组】输出（[..]）。
+    板块注解提示词要求输出数组，且无 response_format 约束时模型多输出
+    ```json [ ... ] ``` —— 旧正则只匹配 {..}，数组全部解析失败。
 
     Returns:
         dict: 解析后的 JSON；解析失败返回空 dict（不抛异常，由调用方决定如何处理）
@@ -404,21 +450,22 @@ def _parse_plan_json(content: str) -> dict:
         return json.loads(content)
     except Exception:
         pass
-    # 2) 从 ```json ... ``` 抠
+    # 2) 从 ```json ... ``` 抠（对象与数组）
     m = _JSON_BLOCK_RE.search(content)
     if m:
         try:
             return json.loads(m.group(1))
         except Exception:
             pass
-    # 3) 找第一个 { 到最后一个 } 抠
-    start = content.find("{")
-    end = content.rfind("}")
-    if start >= 0 and end > start:
-        try:
-            return json.loads(content[start : end + 1])
-        except Exception:
-            pass
+    # 3) 首末抠取：优先数组 [..]（板块注解场景），失败再试对象 {..}
+    for start_ch, end_ch in (("[", "]"), ("{", "}")):
+        start = content.find(start_ch)
+        end = content.rfind(end_ch)
+        if start >= 0 and end > start:
+            try:
+                return json.loads(content[start : end + 1])
+            except Exception:
+                continue
     return {}
 
 
@@ -1298,80 +1345,454 @@ def _sanitize_discoveries(
     }
 
 
-async def generate_discover(
-    low_accum: list[dict],
-    momentum: list[dict],
+def _evidence_for_candidate(candidate: dict, news: list[dict]) -> list[dict]:
+    """Attach only keyword-matched evidence; unrelated headlines are intentionally omitted."""
+    sector = str(candidate.get("sector") or "")
+    keywords = {sector[i:i + size] for size in (2, 3) for i in range(max(0, len(sector) - size + 1))}
+    evidence: list[dict] = []
+    for index, item in enumerate(news):
+        title = str(item.get("title") or item.get("content") or "").strip()
+        if not title or not any(keyword in title for keyword in keywords):
+            continue
+        evidence.append({
+            "evidence_id": f"news-{index}",
+            "title": title[:100],
+            "time": str(item.get("time") or "")[:19],
+            "source": str(item.get("source") or "")[:30],
+            "url": str(item.get("url") or ""),
+            "why_relevant": f"标题与「{sector}」关键词匹配",
+        })
+        if len(evidence) == 3:
+            break
+    return evidence
+
+
+def _quantitative_discovery(candidate: dict, news: list[dict]) -> dict:
+    technical = candidate["technical"]
+    evidence = _evidence_for_candidate(candidate, news)
+    score = int(candidate["score"])
+    return {
+        "sector": candidate["sector"],
+        "score": score,
+        "quantitative_score": score,
+        "score_breakdown": candidate["score_breakdown"],
+        "ambush_type": "低位技术回拉观察",
+        "catalyst_window": "未来 3-10 个交易日",
+        "catalyst_logic": "已有消息证据待核验。" if evidence else "当前无可验证消息催化，作为技术面观察候选。",
+        "technical_pattern": "；".join(candidate["selection_reasons"]),
+        "breakout_trigger": f"放量站上 ¥{candidate['resistance_price']:.2f} 后确认",
+        "tech_indicators": [
+            {"name": "MA20", "value": f"¥{technical.get('ma20') or 0:.2f}", "signal": "利多" if technical.get("trend") != "下降" else "中性", "comment": "服务端历史K线计算"},
+            {"name": "20日波动率", "value": f"{technical.get('volatility_20d_pct') or 0:.2f}%", "signal": "中性", "comment": "服务端历史K线计算"},
+            {"name": "量能趋势", "value": technical.get("volume_trend") or "数据不足", "signal": "利多" if technical.get("volume_trend") == "缩量" else "中性", "comment": "服务端历史K线计算"},
+        ],
+        "news_highlights": evidence,
+        "evidence": evidence,
+        "stocks": [{
+            key: candidate[key] for key in (
+                "code", "name", "current_price", "support_price", "support_name", "resistance_price",
+                "resistance_name", "volatility_tag", "technical_basis", "ambush_zone", "target_win", "stop_loss",
+            )
+        } | {"stock_logic": "；".join(candidate["selection_reasons"]), "technical": technical}],
+        "level": "高" if score >= 70 else "中",
+        "risk_warning": f"跌破 ¥{candidate['stop_loss']:.2f} 或未能站稳关键支撑时退出。",
+        "verification": {"status": "unverified", "risks": [], "referenced_news_ids": []},
+    }
+
+
+def _verification_messages(discoveries: list[dict]) -> list[dict]:
+    payload = []
+    for item in discoveries:
+        stock = item["stocks"][0]
+        payload.append({
+            "code": stock["code"], "sector": item["sector"], "score": item["score"],
+            "technical_pattern": item["technical_pattern"],
+            "evidence": [{"evidence_id": e["evidence_id"], "title": e["title"]} for e in item["evidence"]],
+        })
+    return [
+        {"role": "system", "content": "你是A股研究核验助手。只能核验给定候选，不能新增股票、改价格、改评分或编造新闻。只输出 JSON。"},
+        {"role": "user", "content": "对每个候选输出 {items:[{code,catalyst_status:confirmed|tentative|none,summary,risks,referenced_news_ids}]}。只可引用输入 evidence_id。\n" + json.dumps(payload, ensure_ascii=False)},
+    ]
+
+
+def _merge_verification(discoveries: list[dict], raw: dict) -> bool:
+    items = raw.get("items") if isinstance(raw, dict) else None
+    if not isinstance(items, list):
+        return False
+    known = {item["stocks"][0]["code"]: item for item in discoveries}
+    merged = 0
+    for verdict in items:
+        if not isinstance(verdict, dict) or verdict.get("code") not in known:
+            continue
+        target = known[verdict["code"]]
+        allowed_ids = {e["evidence_id"] for e in target["evidence"]}
+        refs = [str(item) for item in verdict.get("referenced_news_ids", []) if str(item) in allowed_ids]
+        status = str(verdict.get("catalyst_status") or "none")
+        if status not in {"confirmed", "tentative", "none"}:
+            status = "none"
+        summary = str(verdict.get("summary") or "").strip()[:240]
+        risks = [str(item).strip()[:120] for item in verdict.get("risks", []) if str(item).strip()][:3]
+        target["verification"] = {"status": status, "summary": summary, "risks": risks, "referenced_news_ids": refs}
+        if summary:
+            target["catalyst_logic"] = summary
+        if risks:
+            target["risk_warning"] = "；".join(risks)
+        merged += 1
+    return merged > 0
+
+
+async def generate_discover(candidates: list[dict], news: list[dict]) -> dict:
+    """Return deterministic candidates; LLM only attaches constrained evidence/risk annotations."""
+    discoveries = [_quantitative_discovery(candidate, news) for candidate in candidates]
+    messages = _verification_messages(discoveries)
+    providers = []
+    if config.MINIMAX_API_KEY:
+        providers.append(("minimax", config.MINIMAX_API_KEY, config.MINIMAX_BASE_URL, config.MINIMAX_MODEL, None))
+    if config.AGNES_API_KEY and (config.AGNES_API_KEY != config.MINIMAX_API_KEY or config.AGNES_BASE_URL != config.MINIMAX_BASE_URL):
+        providers.append(("agnes", config.AGNES_API_KEY, config.AGNES_BASE_URL, config.AGNES_MODEL, _agnes_limiter))
+
+    failures: list[str] = []
+    for provider, api_key, base_url, model, limiter in providers:
+        try:
+            logger.info("calling discover verifier provider=%s model=%s candidates=%d", provider, model, len(discoveries))
+            response = await _call_llm_with_retry(
+                _get_client(api_key, base_url), model, messages, temperature=0.2,
+                max_tokens=config.DISCOVER_MAX_TOKENS, response_format={"type": "json_object"}, limiter=limiter,
+            )
+            if getattr(response.choices[0], "finish_reason", None) == "length":
+                raise RuntimeError("LLM verification output was truncated")
+            if _merge_verification(discoveries, _parse_plan_json(_first_choice_text(response))):
+                return {
+                    "discoveries": discoveries,
+                    "engine_type": "ai_verification",
+                    "engine_name": f"🤖 量化筛选 + {provider} 核验",
+                    "engine_desc": "候选、评分和技术价位由服务端量化计算；模型仅核验消息和风险。",
+                    "model": model,
+                    "degraded": False,
+                }
+            raise RuntimeError("LLM verification did not return valid candidate-bound JSON")
+        except Exception as error:
+            logger.warning("discover verifier failed provider=%s: %r", provider, error)
+            failures.append(provider)
+
+    return {
+        "discoveries": discoveries,
+        "engine_type": "quantitative",
+        "engine_name": "⚡ 量化低位筛选",
+        "engine_desc": "模型核验不可用，已保留真实行情、历史K线与量化评分结果。",
+        "model": None,
+        "degraded": True,
+        "degraded_reason": "providers_failed:" + ",".join(failures) if failures else "no_provider_configured",
+    }
+
+
+# ====================== 8. v4.4 板块级 Alpha 掘金（LLM 注解） ======================
+# 与 v4.1 个股版不同：板块候选、评分、技术价位、新闻证据全部由
+# sector_alpha 引擎确定，LLM 只做三件事：
+#   1. 基于给定新闻证据提炼前瞻催化逻辑（预期差分析）
+#   2. 给出右侧质变启动信号与风险纪律
+#   3. 在引擎给定的板块代表股池内补充个股注解（禁止新增/改价）
+SECTOR_DISCOVER_SYSTEM_PROMPT = (
+    "你是一名顶尖 A 股宏观策略分析师与游资决策导师，专注【低位埋伏、事件催化左侧博弈】。\n"
+    "【极其重要的原则】\n"
+    "1. 严禁事后解释已经大涨的板块或股票！核心价值是左侧埋伏。\n"
+    "2. 候选板块、评分、技术价位、新闻证据全部由量化引擎给出，是事实，你只能注解，"
+    "严禁修改、新增或编造。\n"
+    "3. 你的注解必须引用【给定的新闻证据】，禁止编造新闻标题或时间。\n"
+    "4. 个股注解只能从【给定板块代表股池】中挑选，禁止新增股票代码。\n"
+    "请严格输出合法 JSON。"
+)
+
+SECTOR_DISCOVER_USER_PROMPT = """请为以下量化引擎筛选出的【低位埋伏板块候选】撰写前瞻注解。
+
+【引擎筛选逻辑说明】
+- 板块池：A 股概念题材（390 个），已排除大涨追涨（60日涨幅>25%）、下降未止跌、
+  单日过热、流动性不足、资金出逃且无催化。
+- 评分 = 左侧位置25 + 缩量止跌20 + 资金回流20 + 消息催化20 + 弹性结构15。
+- 所有技术指标（MA20/MA60、60日涨幅、回撤、量能收缩）基于板块指数真实历史K线。
+
+【候选板块（{n_sectors} 个，按评分排序）】
+{sectors_block}
+
+【7x24 快讯池（{n_news} 条，注解必须引用，禁止编造）】
+{news_block}
+
+【注解任务与输出格式】
+对每个候选板块输出一个方案（JSON 数组 discoveries，顺序保持与输入一致），每项包含：
+- sector: 板块名（必须与输入完全一致，禁止修改）
+- catalyst_logic: 前瞻催化逻辑与预期差（≤150字，引用给定新闻证据；无相关新闻时
+  基于板块技术形态与资金面写"技术面左侧逻辑"）
+- catalyst_window: 预判爆发窗口（如 "未来3-5个交易日" / "下周"）
+- breakout_trigger: 右侧质变启动信号（≤40字，如 "放量突破箱体上轨且成交额放大1.5倍"）
+- news_highlights: 数组，从给定快讯池中挑 2~3 条与本板块强相关的：
+  {{
+    "title": "新闻标题（必须来自快讯池原文，≤80字）",
+    "time": "时间（HH:MM 或原样）",
+    "source": "新闻源",
+    "why_relevant": "≤40字为什么利多"
+  }}
+  没有强相关新闻可以给空数组，禁止凑数。
+- stocks: 数组，从【给定板块代表股池】中选 1~2 只：
+  {{
+    "code": "代码（必须来自给定池）",
+    "name": "名称（必须来自给定池）",
+    "stock_logic": "≤40字个股埋伏理由（结合给定支撑/压力位）"
+  }}
+- level: "高" / "中"（基于催化强度与位置安全边际判断）
+- risk_warning: ≤50字的风控与认错撤退纪律
+
+【输出 schema（严格 JSON，只输出数组）】
+[
+  {{
+    "sector": "板块名",
+    "catalyst_logic": "...",
+    "catalyst_window": "...",
+    "breakout_trigger": "...",
+    "news_highlights": [...],
+    "stocks": [...],
+    "level": "高",
+    "risk_warning": "..."
+  }},
+  ...
+]
+
+请直接输出 JSON："""
+
+
+def build_sector_discover_messages(
     sectors: list[dict],
     news: list[dict],
-    all_valid_codes: dict[str, str] | None = None,
-) -> dict:
-    """v4.1+: AI 前瞻 Alpha 掘金 — 基于催化预期差与低位形态，发掘 3 个最佳埋伏方向。
-
-    Returns:
-        dict: {
-            "discoveries": [
-                {
-                    "sector": str,
-                    "ambush_type": str,
-                    "catalyst_window": str,
-                    "catalyst_logic": str,
-                    "technical_pattern": str,
-                    "stocks": [{"code", "name", "current_price", "ambush_zone", "target_win", "stop_loss", "stock_logic"}],
-                    "level": str,
-                    "risk_warning": str,
-                }, ...
-            ],
-            "model": str,
-        }
-    """
-    client = _get_client()
-    messages = build_discover_messages(low_accum, momentum, sectors, news)
-    logger.info(
-        "calling LLM (discover): model=%s low_accum=%d momentum=%d sectors=%d news=%d",
-        config.LLM_MODEL_NAME, len(low_accum), len(momentum), len(sectors), len(news),
-    )
-
-    raw = {}
-    try:
-        resp = await _call_llm_with_retry(
-            client=client,
-            model=config.LLM_MODEL_NAME,
-            messages=messages,
-            temperature=0.6,
-            # v4.3 第二次调整: 4000 -> 6000, 实测 M2.7 think 块 + JSON 总 4414 tokens, 4000 不够
-            max_tokens=6000,
-            response_format={"type": "json_object"},
-        )
-        content = _first_choice_text(resp)
-        # v4.3 调试: 把完整 raw content dump 到文件, 方便排查 thinking model 解析失败问题
-        try:
-            from pathlib import Path
-            dump_dir = Path(config.DATA_DIR) / "_debug_llm"
-            dump_dir.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            (dump_dir / f"discover_{ts}.txt").write_text(
-                f"=== length: {len(content)} ===\n"
-                f"=== finish_reason: {resp.choices[0].finish_reason} ===\n"
-                f"=== usage: {resp.usage.model_dump() if resp.usage else None} ===\n"
-                f"=== content ===\n{content}\n",
-                encoding="utf-8",
+) -> list[dict]:
+    """打包板块级 discover 注解 messages。"""
+    def _fmt_sectors() -> str:
+        lines: list[str] = []
+        for s in sectors:
+            tech = s.get("tech", {})
+            ff = s.get("fund_flow") or {}
+            metrics = (
+                f"60日涨幅 {tech.get('ret_60d')}%, 距高点回撤 {tech.get('drawdown_pct')}%, "
+                f"MA20/MA60粘合 {tech.get('ma_bunching_pct')}%, "
+                f"量能收缩比 {tech.get('vol_shrink_ratio')}, 止跌={tech.get('stabilized')}, "
+                f"趋势={tech.get('trend')}"
             )
-            # 只保留最近 5 个文件
-            dumps = sorted(dump_dir.glob("discover_*.txt"), key=lambda p: p.stat().st_mtime)
-            for old in dumps[:-5]:
-                try: old.unlink()
-                except Exception: pass
-        except Exception as dump_err:
-            logger.warning("dump llm content failed: %r", dump_err)
-        logger.info("discover raw content: %s", content[:300])
-        raw = _parse_plan_json(content)
-    except Exception as e:
-        logger.warning("discover LLM call failed, engaging guaranteed algorithmic fallback: %r", e)
+            fund = (
+                f"主力净额 {ff.get('net_amount')}亿, 领涨股 {ff.get('leading_stock')} "
+                f"({ff.get('leading_change_pct')}%), 公司 {ff.get('company_count')}家"
+                if ff else "无资金流数据"
+            )
+            evidence = "；".join(h["title"][:40] for h in s.get("news_hits", [])[:3]) or "无"
+            stocks = "；".join(
+                f"{st.get('name')}({st.get('code')}) 现价{st.get('current_price')} "
+                f"支撑{st.get('support_price')} 压力{st.get('resistance_price')}"
+                for st in s.get("stocks", [])
+            )
+            lines.append(
+                f"{s['name']}（评分 {s['score']}，{s['ambush_type']}）\n"
+                f"  技术面: {metrics}\n"
+                f"  资金面: {fund}\n"
+                f"  匹配新闻: {evidence}\n"
+                f"  代表股池: {stocks or '无'}"
+            )
+        return "\n".join(lines)
 
-    return _sanitize_discoveries(
-        raw,
-        all_valid_codes=all_valid_codes or {},
-        low_accum=low_accum,
-        sectors=sectors,
-        news=news,
-    )
+    def _fmt_news() -> str:
+        lines: list[str] = []
+        # 注解模型上下文充足（M2.7 支持 1M），7x24 快讯全量喂入，引用更充分
+        for n in news[:50]:
+            t = n.get("time", "") or "?"
+            if "T" in t:
+                t = t.split("T", 1)[1][:8]
+            title = n.get("title") or n.get("content", "")[:80]
+            lines.append(f"- [{t}] {title}")
+        return "\n".join(lines)
+
+    return [
+        {"role": "system", "content": SECTOR_DISCOVER_SYSTEM_PROMPT},
+        {
+            "role": "user",
+            "content": SECTOR_DISCOVER_USER_PROMPT.format(
+                n_sectors=len(sectors),
+                sectors_block=_fmt_sectors(),
+                n_news=len(news),
+                news_block=_fmt_news(),
+            ),
+        },
+    ]
+
+
+def _merge_sector_annotations(
+    sectors: list[dict],
+    raw_annotations: Any,
+) -> tuple[list[dict], int]:
+    """把 LLM 注解合并到引擎板块数据上（引擎字段永远优先）。
+
+    返回 (discoveries, matched_count)。matched_count = 拿到有效文本注解
+    （catalyst_logic / breakout_trigger / risk_warning 至少一项非空）的板块数，
+    用于判定 LLM 注解是否真正生效——LLM 返回空 {} 时 matched_count 为 0。
+    """
+    from app.services.sector_alpha import sector_to_discovery
+
+    raw_list: list = []
+    if isinstance(raw_annotations, list):
+        raw_list = raw_annotations
+    elif isinstance(raw_annotations, dict):
+        raw_list = raw_annotations.get("discoveries") or []
+
+    def _norm_name(name: str) -> str:
+        # 归一化板块名：去序号前缀（"1. 英伟达概念" / "1、英伟达概念"）、去引号与空白
+        n = str(name or "").strip().strip("\"'“”")
+        return re.sub(r"^\d+[\.、\)）]\s*", "", n).strip()
+
+    ann_by_name: dict[str, dict] = {}
+    for item in raw_list:
+        if isinstance(item, dict) and item.get("sector"):
+            ann_by_name[_norm_name(item["sector"])] = item
+
+    out: list[dict] = []
+    matched_count = 0
+    for sector in sectors:
+        discovery = sector_to_discovery(sector)
+        ann = ann_by_name.get(sector["name"])
+        if not ann:
+            # 容错：LLM 名称可能被截断（"英伟达概念" → "英伟达"）或加了前缀
+            for norm, candidate in ann_by_name.items():
+                if sector["name"].startswith(norm) or norm.startswith(sector["name"]) or norm in sector["name"]:
+                    ann = candidate
+                    break
+        if ann:
+            catalyst_logic = str(ann.get("catalyst_logic") or "").strip()[:300]
+            if catalyst_logic:
+                discovery["catalyst_logic"] = catalyst_logic
+            window = str(ann.get("catalyst_window") or "").strip()[:30]
+            if window:
+                discovery["catalyst_window"] = window
+            trigger = str(ann.get("breakout_trigger") or "").strip()[:100]
+            if trigger:
+                discovery["breakout_trigger"] = trigger
+            level = str(ann.get("level") or "").strip()
+            if level in ("高", "中", "低"):
+                discovery["level"] = level
+            risk = str(ann.get("risk_warning") or "").strip()[:200]
+            if risk:
+                discovery["risk_warning"] = risk
+
+            # news_highlights：LLM 引用必须来自引擎命中新闻（防止编造）
+            engine_titles = {h["title"][:80] for h in sector.get("news_hits", [])}
+            if ann.get("news_highlights") and engine_titles:
+                merged: list[dict] = []
+                for nh in ann.get("news_highlights", [])[:4]:
+                    if not isinstance(nh, dict):
+                        continue
+                    title = str(nh.get("title") or "").strip()[:80]
+                    if title and any(et in title or title in et for et in engine_titles):
+                        merged.append({
+                            "title": title,
+                            "time": str(nh.get("time") or "")[:8],
+                            "source": str(nh.get("source") or "")[:20],
+                            "why_relevant": str(nh.get("why_relevant") or "")[:120],
+                        })
+                if merged:
+                    discovery["news_highlights"] = merged
+
+            # stocks 注解：code 必须来自引擎池
+            engine_codes = {st["code"] for st in sector.get("stocks", [])}
+            llm_stocks = ann.get("stocks")
+            if isinstance(llm_stocks, list) and engine_codes:
+                by_code = {st["code"]: st for st in sector.get("stocks", [])}
+                ordered: list[dict] = []
+                seen: set[str] = set()
+                for s_item in llm_stocks[:3]:
+                    if not isinstance(s_item, dict):
+                        continue
+                    code = _normalize_code_robust(str(s_item.get("code") or ""))
+                    if code not in engine_codes or code in seen:
+                        continue
+                    seen.add(code)
+                    base = dict(by_code[code])
+                    logic = str(s_item.get("stock_logic") or "").strip()[:120]
+                    if logic:
+                        base["stock_logic"] = logic
+                    ordered.append(base)
+                for st in sector.get("stocks", []):
+                    if st["code"] not in seen:
+                        ordered.append(st)
+                if ordered:
+                    discovery["stocks"] = ordered
+
+            if catalyst_logic or trigger or risk:
+                matched_count += 1
+
+        discovery["verification"] = {"status": "confirmed" if ann else "unverified", "risks": [], "referenced_news_ids": []}
+        out.append(discovery)
+    return out, matched_count
+
+
+async def generate_sector_discover(
+    sectors: list[dict],
+    news: list[dict],
+) -> dict:
+    """板块候选 → LLM 注解 → 与前端兼容的完整响应。
+
+    LLM 不可用/返回空/失败时降级为纯引擎输出（真实数据，非虚构）。
+    """
+    from app.services.sector_alpha import sector_to_discovery
+
+    messages = build_sector_discover_messages(sectors, news)
+    providers = []
+    # agnes 优先：实测稳定（多次服务内调用全成功）；MiniMax-M2.7 的 thinking 模式
+    # 输出偶发被平台截断在 <think> 阶段（finish_reason=stop 但无 JSON 正文），留作兜底
+    if config.AGNES_API_KEY:
+        providers.append(("agnes", config.AGNES_API_KEY, config.AGNES_BASE_URL, config.AGNES_MODEL, _agnes_limiter))
+    if config.MINIMAX_API_KEY and (config.MINIMAX_API_KEY != config.AGNES_API_KEY or config.MINIMAX_BASE_URL != config.AGNES_BASE_URL):
+        providers.append(("minimax", config.MINIMAX_API_KEY, config.MINIMAX_BASE_URL, config.MINIMAX_MODEL, None))
+
+    failures: list[str] = []
+    for provider, api_key, base_url, model, limiter in providers:
+        for attempt in (1, 2, 3):
+            try:
+                logger.info("calling sector discover annotator provider=%s model=%s sectors=%d (attempt %d)",
+                            provider, model, len(sectors), attempt)
+                response = await _call_llm_with_retry(
+                    _get_client(api_key, base_url), model, messages, temperature=0.3,
+                    # 不用 response_format=json_object：MiniMax/M2.7 等 thinking 模型在该模式下
+                    # 偶发只输出 <think> 思考块就 stop（平台侧不稳定）；自然输出 =
+                    # <think> + ```json 块，_parse_plan_json 已兼容。
+                    # M2.7 支持 1M 上下文，max_tokens 放宽到 8192 防截断
+                    max_tokens=max(8192, config.DISCOVER_MAX_TOKENS),
+                    limiter=limiter,
+                )
+                if getattr(response.choices[0], "finish_reason", None) == "length":
+                    raise RuntimeError("LLM sector annotation output was truncated")
+                content = _first_choice_text(response)
+                raw = _parse_plan_json(content)
+                if not raw:
+                    # 偶发空输出（平台波动/模型抽风）：留痕后重试
+                    logger.warning("LLM sector annotation empty: provider=%s raw_content_head=%r",
+                                   provider, (content or "")[:200])
+                    raise RuntimeError("LLM sector annotation returned empty JSON")
+                annotated, matched = _merge_sector_annotations(sectors, raw)
+                if annotated and matched >= max(1, len(sectors) // 2):
+                    return {
+                        "discoveries": annotated,
+                        "engine_type": "ai_verification",
+                        "engine_name": f"🧭 板块左侧挖掘 + {provider} 催化注解",
+                        "engine_desc": "板块、评分、价位、新闻证据由引擎量化计算；模型仅提炼催化逻辑与风险纪律。",
+                        "model": model,
+                        "degraded": False,
+                    }
+                raise RuntimeError("LLM sector annotation matched too few sectors (%d/%d)" % (matched, len(sectors)))
+            except Exception as error:
+                logger.warning("sector discover annotator failed provider=%s attempt=%d: %r", provider, attempt, error)
+                if attempt == 3:
+                    failures.append(provider)
+
+    discoveries = [sector_to_discovery(s) for s in sectors]
+    return {
+        "discoveries": discoveries,
+        "engine_type": "quantitative",
+        "engine_name": "🧭 板块左侧挖掘引擎",
+        "engine_desc": "模型注解不可用，已保留真实板块指数K线、资金流、新闻证据与量化评分。",
+        "model": None,
+        "degraded": True,
+        "degraded_reason": "providers_failed:" + ",".join(failures) if failures else "no_provider_configured",
+    }

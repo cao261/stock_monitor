@@ -41,3 +41,14 @@ LLM_MODEL_NAME: str = os.environ.get("LLM_MODEL_NAME", "gpt-3.5-turbo").strip()
 LLM_ENABLED: bool = bool(LLM_API_KEY)
 # v4.3 第二次调整: 120 -> 180, 实测 M2.7 思考 + JSON 完整响应需 113s, 120s + 重试会触发超时
 LLM_TIMEOUT_SECONDS: float = float(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
+
+# Alpha 核验可配置双模型。旧 LLM_* 配置仍作为 MiniMax（主模型）的兼容回退。
+MINIMAX_API_KEY: str = os.environ.get("MINIMAX_API_KEY", LLM_API_KEY).strip()
+MINIMAX_BASE_URL: str = os.environ.get("MINIMAX_BASE_URL", LLM_BASE_URL).strip()
+MINIMAX_MODEL: str = os.environ.get("MINIMAX_MODEL", LLM_MODEL_NAME).strip()
+AGNES_API_KEY: str = os.environ.get("AGNES_API_KEY", "").strip()
+AGNES_BASE_URL: str = os.environ.get("AGNES_BASE_URL", "https://apihub.agnes-ai.cn/v1").strip()
+AGNES_MODEL: str = os.environ.get("AGNES_MODEL", "agnes-2.5-flash").strip()
+AGNES_RPM: int = int(os.environ.get("AGNES_RPM", "20"))
+AGNES_MAX_CONCURRENCY: int = int(os.environ.get("AGNES_MAX_CONCURRENCY", "1"))
+DISCOVER_MAX_TOKENS: int = int(os.environ.get("DISCOVER_MAX_TOKENS", "2200"))
