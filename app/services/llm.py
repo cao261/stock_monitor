@@ -104,17 +104,28 @@ def build_messages(summary: dict) -> list[dict]:
 
 
 # ====================== 3. v4.0 AI 智能规划 prompt（JSON 输出）======================
-# 教 LLM 看 K 线，输出结构化建仓计划
+# 教 LLM 结合 K 线 + 真实持仓成本与盈亏画像，输出高度个性化的操盘计划
 PLAN_SYSTEM_PROMPT = (
-    "你是【前瞻性交易领航员】，擅长从 K 线技术特征中提炼出可执行的建仓计划。\n"
+    "你是【前瞻性交易领航员】，擅长结合技术面 K 线形态与用户的【真实持仓成本与盈亏画像】"
+    "提炼出高度个性化、有深度、可执行的操盘规划与风控决策。\n"
     "你只输出【严格合法 JSON】，不要任何 markdown 包裹、不要解释性文字、不要前后缀。"
 )
 
-PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股生成前瞻建仓计划：
+PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股标的生成个性化前瞻操盘规划：
 
-代码：{ts_code}
-名称：{name}
-当前价：{current_price}
+标的代码：{ts_code}
+标的名称：{name}
+当前现价：{current_price}
+
+【用户专属持仓与风控画像】
+- 持仓状态：{holding_status}
+- 持仓成本价：{cost_price_str}
+- 持仓数量：{position_str}
+- 浮动盈亏金额：{floating_pnl_str}
+- 当前盈亏比例：{return_rate_str}
+- 原有交易备忘：{existing_trade_note}
+- 原有止盈设定：{existing_target_win}
+- 原有止损设定：{existing_target_loss}
 
 【50 天技术特征摘要】
 {features_json}
@@ -122,15 +133,27 @@ PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股生成前瞻建仓计划：
 【最近 10 天原始 K 线 (OHLCV，单位：元/手)】
 {ohlcv_json}
 
-【输出 schema — 必须严格遵循，字段顺序不限】
+【领航员决策核心准则】
+1. **若用户有持仓**：
+   - 必须深度参考用户的【成本价与浮盈/浮亏现状】制定针对性策略！
+   - 浮盈丰厚（收益率 > +10%）：重点指导如何保住利润（建议向上移动保本止盈线，在上方阻力位分批减半仓锁利）；
+   - 成本线附近（收益率 -3% ~ +3%）：分析当前蓄势与量能，明确继续持有还是借冲高调仓；
+   - 深度浮亏（收益率 < -5%）：结合关键支撑位与均线，给出坚决止损、反弹减仓或金字塔左侧补仓摊薄成本的明确操作指导；
+   - entry_price_min/max 应设为建议的【最佳补仓/加仓买点区间】；
+   - target_win / target_loss 必须与用户实际成本价匹配，形成合理盈亏比。
+2. **若用户空仓**：
+   - 聚焦于【首次建仓最佳甜区 (entry_price_min ~ entry_price_max)】、买入触发条件与前瞻止盈止损。
+
+【输出 schema — 严格合法 JSON】
 {{
-  "entry_price_min": float,      // 理想建仓下限（建议在 60日线 / 20日线 / 近期低点附近）
-  "entry_price_max": float,      // 理想建仓上限（建议在 5日线 / 近期阻力位附近）
-  "target_win": float,           // 建议止盈（建议在 60日线 上方 / 前高 附近）
-  "target_loss": float,          // 建议止损（建议在 entry_price_min 下方 3-5%）
-  "trade_note": string,          // ≤100 字的建仓策略简述（含触发条件 + 风险点 + 持有周期）
-  "rationale": string,           // ≤50 字的决策依据（让用户能看懂你为什么这么定）
-  "tags": [string, ...]          // 技术标签：["放量突破"] / ["缩量企稳"] / ["左侧建仓"] / ["右侧趋势"] 等
+  "entry_price_min": float,      // 理想建仓/补仓下限（元）
+  "entry_price_max": float,      // 理想建仓/补仓上限（元）
+  "target_win": float,           // 建议止盈目标价（元）
+  "target_loss": float,          // 建议防守止损价（元）
+  "position_advice": string,     // 针对当前持仓状态的核心操作指令（如 "加仓待涨" / "逢高锁利" / "防守减仓" / "观望等待" / "持股待突破"）
+  "trade_note": string,          // ≤120 字的个性化策略简述（结合成本与K线，包含操作节奏与风控要求）
+  "rationale": string,           // ≤80 字的决策依据（明确指出成本价、盈亏比例与技术面共振逻辑）
+  "tags": [string, ...]          // 策略标签：["放量突破"] / ["移动锁利"] / ["支撑位低吸"] / ["左侧定投"] / ["反弹减仓"] 等
 }}
 
 注意：
@@ -138,8 +161,7 @@ PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股生成前瞻建仓计划：
 2. entry_price_min 必须 < entry_price_max
 3. target_loss 必须 < entry_price_min
 4. target_win 必须 > entry_price_max
-5. trade_note 和 rationale 不要堆砌"风险提示"，要具体可执行
-6. 如果数据不足（MA 缺失 / 数据点 < 5），合理外推或给保守建议，不要凭空捏造
+5. 策略必须针对用户的持仓状态（有仓还是空仓、赚还是赔）给出针对性建议，严禁假大空的套话
 
 请直接输出 JSON："""
 
@@ -150,8 +172,25 @@ def build_plan_messages(
     current_price: float | None,
     features: dict,
     ohlcv_10d: list[dict],
+    holding_info: dict | None = None,
 ) -> list[dict]:
-    """打包 AI 智能规划用的 messages（强制 JSON 输出）。"""
+    """打包 AI 智能规划用的 messages（注入持仓画像与个性化决策上下文）。"""
+    h = holding_info or {}
+    has_pos = h.get("has_position", False)
+    cost = h.get("cost_price")
+    pos = h.get("position")
+    pnl = h.get("floating_pnl")
+    ret = h.get("return_rate")
+
+    holding_status = f"已持仓 {pos} 股" if has_pos and pos else ("已持仓" if has_pos else "空仓观望中")
+    cost_str = f"¥{cost:.3f} 元/股" if cost is not None else "未设置/无持仓"
+    pos_str = f"{pos} 股" if pos is not None else "无持仓 (0 股)"
+    pnl_str = f"{'+' if pnl and pnl > 0 else ''}{pnl:.2f} 元" if pnl is not None else "无"
+    ret_str = f"{'+' if ret and ret > 0 else ''}{ret:.2f}%" if ret is not None else "无"
+    existing_note = str(h.get("existing_trade_note") or "无").strip()
+    existing_tw = f"¥{h.get('existing_target_win'):.2f} 元" if h.get("existing_target_win") is not None else "未设"
+    existing_tl = f"¥{h.get('existing_target_loss'):.2f} 元" if h.get("existing_target_loss") is not None else "未设"
+
     return [
         {"role": "system", "content": PLAN_SYSTEM_PROMPT},
         {
@@ -159,7 +198,15 @@ def build_plan_messages(
             "content": PLAN_USER_PROMPT_TEMPLATE.format(
                 ts_code=ts_code,
                 name=name or "未知",
-                current_price=current_price if current_price is not None else "未知",
+                current_price=f"{current_price:.2f}" if current_price is not None else "未知",
+                holding_status=holding_status,
+                cost_price_str=cost_str,
+                position_str=pos_str,
+                floating_pnl_str=pnl_str,
+                return_rate_str=ret_str,
+                existing_trade_note=existing_note,
+                existing_target_win=existing_tw,
+                existing_target_loss=existing_tl,
                 features_json=json.dumps(features, ensure_ascii=False, indent=2),
                 ohlcv_json=json.dumps(ohlcv_10d, ensure_ascii=False, indent=2),
             ),
@@ -324,8 +371,9 @@ def _sanitize_plan(raw: dict, current_price: float | None = None) -> dict:
         if out["target_win"] <= out["entry_price_max"]:
             out["target_win"] = round(out["entry_price_max"] * 1.08, 4)
 
+    out["position_advice"] = str(raw.get("position_advice", "")).strip()[:50] or None
     out["trade_note"] = str(raw.get("trade_note", "")).strip()[:500] or None
-    out["rationale"] = str(raw.get("rationale", "")).strip()[:200] or None
+    out["rationale"] = str(raw.get("rationale", "")).strip()[:300] or None
 
     # tags: list[str]，去空 + 去重
     raw_tags = raw.get("tags", []) or []
@@ -350,8 +398,9 @@ async def generate_ai_plan(
     current_price: float | None,
     features: dict,
     ohlcv_10d: list[dict],
+    holding_info: dict | None = None,
 ) -> dict:
-    """v4.0: 给定一只股票的技术特征 + 最近 10 天 OHLCV，让 LLM 输出一份前瞻建仓计划。
+    """v4.0+: 给定股票技术特征 + 最近 10 天 OHLCV + 个人持仓成本画像，生成个性化操盘规划。
 
     Returns:
         dict: {
@@ -359,21 +408,17 @@ async def generate_ai_plan(
             "entry_price_max": float | None,
             "target_win": float | None,
             "target_loss": float | None,
+            "position_advice": str | None,
             "trade_note": str | None,
             "rationale": str | None,
             "tags": list[str],
         }
-
-    错误处理：
-    - LLM 未配置 → RuntimeError（让 router 返 503）
-    - 网络错误   → 透传原 openai 异常（让 router 返 502）
-    - JSON 解析失败 → 走兜底清洗，trade_note / rationale 为 None
     """
     client = _get_client()
-    messages = build_plan_messages(ts_code, name, current_price, features, ohlcv_10d)
+    messages = build_plan_messages(ts_code, name, current_price, features, ohlcv_10d, holding_info=holding_info)
     logger.info(
-        "calling LLM (ai-plan): model=%s ts_code=%s features=%d keys ohlcv=%d bars",
-        config.LLM_MODEL_NAME, ts_code, len(features), len(ohlcv_10d),
+        "calling LLM (ai-plan): model=%s ts_code=%s holding=%s features=%d keys ohlcv=%d bars",
+        config.LLM_MODEL_NAME, ts_code, bool(holding_info and holding_info.get('has_position')), len(features), len(ohlcv_10d),
     )
 
     # 尝试用 response_format 强制 JSON（OpenAI 官方 / 部分兼容服务支持）

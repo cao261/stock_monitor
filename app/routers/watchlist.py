@@ -589,7 +589,30 @@ async def ai_plan(
         ohlcv_days=10,
     )
 
-    # ===== 3. 调 LLM 拿 JSON 计划 =====
+    # ===== 2.5 组装用户个性化持仓画像与风控底账 =====
+    cost_price = obj.cost_price
+    position = obj.position
+    floating_pnl = None
+    return_rate = None
+    has_pos = bool(position and int(position) > 0 and cost_price and float(cost_price) > 0)
+    if has_pos and current_price and current_price > 0:
+        diff = float(current_price) - float(cost_price)
+        floating_pnl = round(diff * int(position), 2)
+        if float(cost_price) > 0:
+            return_rate = round(diff / float(cost_price) * 100.0, 2)
+
+    holding_info = {
+        "has_position": has_pos,
+        "cost_price": float(cost_price) if cost_price is not None else None,
+        "position": int(position) if position is not None else None,
+        "floating_pnl": floating_pnl,
+        "return_rate": return_rate,
+        "existing_trade_note": obj.trade_note,
+        "existing_target_win": float(obj.target_win) if obj.target_win is not None else None,
+        "existing_target_loss": float(obj.target_loss) if obj.target_loss is not None else None,
+    }
+
+    # ===== 3. 调 LLM 拿个性化操盘计划 =====
     try:
         plan = await llm.generate_ai_plan(
             ts_code=obj.ts_code,
@@ -597,6 +620,7 @@ async def ai_plan(
             current_price=current_price,
             features=features,
             ohlcv_10d=ohlcv_10d,
+            holding_info=holding_info,
         )
     except ValueError as e:
         # LLM 输出 JSON 缺关键字段
@@ -613,12 +637,13 @@ async def ai_plan(
             detail=f"AI 规划调用失败：{e}",
         ) from e
 
-    # ===== 4. 把"当前已设值"也带上，前端 Modal 能做覆盖提示 =====
+    # ===== 4. 把"当前已设值"与"持仓画像"也带上，前端 Modal 做高保真展示 =====
     return {
         "stock_id": obj.id,
         "ts_code": obj.ts_code,
         "name": obj.name or "",
         "current_price": current_price,
+        "holding_info": holding_info,
         # v4.0 引擎会拿这俩字段做 is_entry_opportunity
         "existing": {
             "entry_price_min": obj.entry_price_min,
@@ -626,10 +651,12 @@ async def ai_plan(
             "target_win": obj.target_win,
             "target_loss": obj.target_loss,
             "trade_note": obj.trade_note,
+            "cost_price": obj.cost_price,
+            "position": obj.position,
         },
-        # AI 给的建议（前端 Modal 显示给用户看）
+        # AI 给的个性化建议
         "plan": plan,
-        # 给前端做"可解释性"展示用（不写库）
+        # 给前端做"可解释性"展示用
         "explain": {
             "features": features,
             "ohlcv_10d": ohlcv_10d,

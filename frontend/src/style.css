@@ -1,195 +1,284 @@
 @import "tailwindcss";
 
-/* ====================== 全局基线 ====================== */
+/* ==========================================================================
+   机构金融报表设计系统 (Institutional Financial Report Theme)
+   ========================================================================== */
+
+:root {
+  --bg-main: #0b0f19;
+  --bg-panel: #111827;
+  --bg-surface: #162032;
+  --bg-surface-hover: #1c2940;
+  --border-subtle: #1e293b;
+  --border-main: #28354d;
+  --border-active: #3b82f6;
+
+  --text-main: #f3f4f6;
+  --text-secondary: #9ca3af;
+  --text-muted: #64748b;
+
+  /* A股金融标准色：涨红跌绿金提示 */
+  --color-up: #f04438;
+  --color-up-bg: rgba(240, 68, 56, 0.12);
+  --color-up-border: rgba(240, 68, 56, 0.35);
+
+  --color-down: #10b981;
+  --color-down-bg: rgba(16, 185, 129, 0.12);
+  --color-down-border: rgba(16, 185, 129, 0.35);
+
+  --color-warn: #f59e0b;
+  --color-warn-bg: rgba(245, 158, 11, 0.12);
+  --color-warn-border: rgba(245, 158, 11, 0.35);
+
+  --color-tech: #06b6d4;
+  --color-ai: #8b5cf6;
+  --color-brand: #3b82f6;
+}
+
 html,
 body,
 #app {
-  height: 100%;
+  min-height: 100%;
   margin: 0;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    "PingFang SC", "Microsoft YaHei", sans-serif;
-  /* 深邃的金融终端渐变背景 */
-  background:
-    radial-gradient(1200px 600px at 10% -10%, rgba(56, 189, 248, 0.08), transparent 60%),
-    radial-gradient(900px 500px at 100% 110%, rgba(244, 63, 94, 0.06), transparent 60%),
-    linear-gradient(135deg, #0a0f1c 0%, #0f172a 50%, #0a0f1c 100%);
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "WenQuanYi Micro Hei", sans-serif;
+  background-color: var(--bg-main);
+  background-image: 
+    radial-gradient(1000px 500px at 50% -100px, rgba(30, 41, 59, 0.35), transparent 70%),
+    linear-gradient(180deg, #0b0f19 0%, #0d1322 100%);
   background-attachment: fixed;
-  color: #e2e8f0; /* slate-200 */
-  min-height: 100vh;
+  color: var(--text-main);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* 所有数字默认等宽 + tabular，避免跳动时宽度抽搐 */
+/* ====================== 等宽与表格数字对齐 ====================== */
 .num,
 .font-mono,
 table,
-.font-mono * {
+input.font-mono {
   font-variant-numeric: tabular-nums;
   font-feature-settings: "tnum" 1;
 }
 
-/* ====================== 玻璃拟物卡片基础 ====================== */
-.glass {
-  background: linear-gradient(
-    180deg,
-    rgba(30, 41, 59, 0.55) 0%,
-    rgba(15, 23, 42, 0.40) 100%
-  );
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
-  border: 1px solid rgba(71, 85, 105, 0.45);
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.04) inset,
-    0 10px 30px -10px rgba(0, 0, 0, 0.5);
-  border-radius: 0.75rem;
+/* ====================== 报表基础容器 ====================== */
+.rpt-panel {
+  background-color: var(--bg-panel);
+  border: 1px solid var(--border-main);
+  border-radius: 0.375rem;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
 }
 
-/* ====================== 渐变文字（情绪分用） ====================== */
-.text-gradient-bull {
-  background: linear-gradient(135deg, #f43f5e 0%, #fb7185 50%, #fb923c 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.text-gradient-bear {
-  background: linear-gradient(135deg, #22c55e 0%, #4ade80 50%, #2dd4bf 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
-}
-.text-gradient-neutral {
-  background: linear-gradient(135deg, #cbd5e1 0%, #94a3b8 100%);
-  -webkit-background-clip: text;
-  background-clip: text;
-  color: transparent;
+.rpt-panel-sub {
+  background-color: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: 0.25rem;
 }
 
-/* ====================== 闪光效果 ====================== */
-.glow-rose {
-  text-shadow:
-    0 0 12px rgba(244, 63, 94, 0.45),
-    0 0 24px rgba(244, 63, 94, 0.25);
-}
-.glow-emerald {
-  text-shadow:
-    0 0 12px rgba(34, 197, 94, 0.45),
-    0 0 24px rgba(34, 197, 94, 0.25);
+/* ====================== 报表表格系统 ====================== */
+.rpt-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 0.8125rem; /* 13px */
 }
 
-/* ====================== 信号徽章 ====================== */
-.badge {
+.rpt-table th {
+  background-color: #131c2e;
+  color: #94a3b8;
+  font-weight: 600;
+  text-align: left;
+  padding: 0.625rem 0.75rem;
+  border-bottom: 1px solid var(--border-main);
+  white-space: nowrap;
+  letter-spacing: 0.025em;
+}
+
+.rpt-table td {
+  padding: 0.5625rem 0.75rem;
+  border-bottom: 1px solid #1a2333;
+  color: #e2e8f0;
+  vertical-align: middle;
+}
+
+.rpt-table tr:hover td {
+  background-color: rgba(30, 41, 59, 0.55);
+}
+
+.rpt-table tr.row-active td {
+  background-color: rgba(59, 130, 246, 0.12);
+}
+
+/* ====================== 金融语义配色工具类 ====================== */
+.text-up {
+  color: var(--color-up);
+}
+.text-down {
+  color: var(--color-down);
+}
+.text-warn {
+  color: var(--color-warn);
+}
+.text-flat {
+  color: #94a3b8;
+}
+
+.bg-up-subtle {
+  background-color: var(--color-up-bg);
+  color: #fca5a5;
+  border: 1px solid var(--color-up-border);
+}
+.bg-down-subtle {
+  background-color: var(--color-down-bg);
+  color: #86efac;
+  border: 1px solid var(--color-down-border);
+}
+.bg-warn-subtle {
+  background-color: var(--color-warn-bg);
+  color: #fde047;
+  border: 1px solid var(--color-warn-border);
+}
+.bg-tech-subtle {
+  background-color: rgba(6, 182, 212, 0.12);
+  color: #67e8f9;
+  border: 1px solid rgba(6, 182, 212, 0.35);
+}
+.bg-ai-subtle {
+  background-color: rgba(139, 92, 246, 0.15);
+  color: #c4b5fd;
+  border: 1px solid rgba(139, 92, 246, 0.4);
+}
+
+/* ====================== 报表徽章与标签 ====================== */
+.rpt-badge {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
-  padding: 0.125rem 0.5rem;
-  border-radius: 0.375rem;
-  font-size: 0.75rem;
+  padding: 0.125rem 0.45rem;
+  border-radius: 0.25rem;
+  font-size: 0.6875rem; /* 11px */
   font-weight: 600;
-  line-height: 1.2;
+  line-height: 1.25;
   white-space: nowrap;
 }
-.badge-breakout {
-  background: linear-gradient(
-    90deg,
-    rgba(244, 63, 94, 0.18) 0%,
-    rgba(251, 113, 133, 0.18) 100%
-  );
-  color: #fecdd3;
-  border: 1px solid rgba(244, 63, 94, 0.55);
-  box-shadow: 0 0 12px rgba(244, 63, 94, 0.35);
-  animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-.badge-shrinking {
-  background: linear-gradient(
-    90deg,
-    rgba(34, 197, 94, 0.18) 0%,
-    rgba(45, 212, 191, 0.18) 100%
-  );
-  color: #bbf7d0;
-  border: 1px solid rgba(34, 197, 94, 0.55);
-  box-shadow: 0 0 8px rgba(34, 197, 94, 0.25);
+
+.rpt-tag {
+  display: inline-block;
+  padding: 0.0625rem 0.375rem;
+  border-radius: 0.2rem;
+  font-size: 0.6875rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-/* v1.2 止盈 / 止损 badge */
-.badge-win {
-  background: linear-gradient(
-    90deg,
-    rgba(16, 185, 129, 0.25) 0%,
-    rgba(34, 197, 94, 0.25) 100%
-  );
-  color: #d1fae5;
-  border: 1px solid rgba(16, 185, 129, 0.7);
-  box-shadow: 0 0 12px rgba(16, 185, 129, 0.4);
-  animation: pulse 1.5s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-.badge-loss {
-  background: linear-gradient(
-    90deg,
-    rgba(239, 68, 68, 0.30) 0%,
-    rgba(220, 38, 38, 0.30) 100%
-  );
-  color: #fee2e2;
-  border: 1px solid rgba(239, 68, 68, 0.8);
-  box-shadow: 0 0 14px rgba(239, 68, 68, 0.55);
-  animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+/* ====================== 报表按钮 ====================== */
+.rpt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  border-radius: 0.25rem;
+  border: 1px solid var(--border-main);
+  background-color: #1a2436;
+  color: #e2e8f0;
+  transition: all 0.15s ease-in-out;
+  cursor: pointer;
+  white-space: nowrap;
 }
 
-/* v4.0 领航员建仓机会 badge —— 金色 + 强发光 + 1s 脉冲 */
-.badge-entry {
-  background: linear-gradient(
-    90deg,
-    rgba(252, 211, 77, 0.32) 0%,
-    rgba(245, 158, 11, 0.32) 100%
-  );
-  color: #fef3c7;
-  border: 1px solid rgba(252, 211, 77, 0.85);
-  box-shadow: 0 0 16px rgba(252, 211, 77, 0.55);
-  animation: pulse 1s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-}
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.65; }
+.rpt-btn:hover {
+  background-color: #24324a;
+  border-color: #384b6e;
+  color: #ffffff;
 }
 
-/* ====================== 表格行交互 ====================== */
-.row-hover {
-  transition: background-color 200ms ease, transform 200ms ease;
+.rpt-btn-primary {
+  background-color: #1d4ed8;
+  border-color: #2563eb;
+  color: #ffffff;
 }
-.row-hover:hover {
-  background-color: rgba(51, 65, 85, 0.4);
-}
-
-/* ====================== 输入框 ====================== */
-input,
-select {
-  font-variant-numeric: tabular-nums;
+.rpt-btn-primary:hover {
+  background-color: #2563eb;
+  border-color: #3b82f6;
 }
 
-/* ====================== 滚动条美化 ====================== */
-::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: rgba(15, 23, 42, 0.4); }
-::-webkit-scrollbar-thumb {
-  background: rgba(71, 85, 105, 0.5);
-  border-radius: 5px;
+.rpt-btn-danger {
+  background-color: rgba(239, 68, 68, 0.2);
+  border-color: rgba(239, 68, 68, 0.4);
+  color: #fca5a5;
 }
-::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, 0.7); }
+.rpt-btn-danger:hover {
+  background-color: rgba(239, 68, 68, 0.35);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #ffffff;
+}
 
-/* ====================== 交易备忘 hover tooltip（v1.1）====================== */
-.note-tip {
+.rpt-btn-sm {
+  padding: 0.2rem 0.5rem;
+  font-size: 0.75rem;
+}
+
+/* ====================== 报表输入控件 ====================== */
+.rpt-input {
+  background-color: #0c1322;
+  border: 1px solid var(--border-main);
+  color: #f3f4f6;
+  border-radius: 0.25rem;
+  padding: 0.375rem 0.625rem;
+  font-size: 0.8125rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.rpt-input:focus {
+  border-color: var(--border-active);
+  box-shadow: 0 0 0 1px rgba(59, 130, 246, 0.5);
+}
+
+.rpt-input-sm {
+  padding: 0.1875rem 0.375rem;
+  font-size: 0.75rem;
+}
+
+/* ====================== 报表弹窗 Shell ====================== */
+.rpt-modal-backdrop {
   position: fixed;
-  pointer-events: none;
+  inset: 0;
+  background-color: rgba(5, 8, 15, 0.75);
+  backdrop-filter: blur(4px);
   z-index: 50;
-  background: rgba(15, 23, 42, 0.97);
-  border: 1px solid rgba(245, 158, 11, 0.35);
-  border-radius: 0.5rem;
-  padding: 0.6rem 0.85rem;
-  max-width: 320px;
-  backdrop-filter: blur(10px) saturate(140%);
-  -webkit-backdrop-filter: blur(10px) saturate(140%);
-  box-shadow: 0 10px 28px -4px rgba(0, 0, 0, 0.6);
-  transform: translate(14px, 14px);
-  animation: noteTipIn 120ms ease-out;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
 }
-@keyframes noteTipIn {
-  from { opacity: 0; transform: translate(14px, 18px); }
-  to   { opacity: 1; transform: translate(14px, 14px); }
+
+.rpt-modal-box {
+  background-color: #111827;
+  border: 1px solid var(--border-main);
+  border-radius: 0.5rem;
+  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.7);
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ====================== 自定义滚动条 ====================== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0d1424;
+}
+::-webkit-scrollbar-thumb {
+  background: #25334d;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #3b4d6e;
 }

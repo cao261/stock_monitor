@@ -37,8 +37,16 @@ SHRINKING_CHANGE_PCT_LO = -1.0
 SHRINKING_CHANGE_PCT_HI = 1.0
 
 
+try:
+    from zoneinfo import ZoneInfo
+    SH_TZ = ZoneInfo("Asia/Shanghai")
+except Exception:
+    SH_TZ = None
+
 # ====================== 工具：交易分钟 ======================
 def _now_time() -> time:
+    if SH_TZ:
+        return datetime.now(SH_TZ).time()
     return datetime.now().time()
 
 

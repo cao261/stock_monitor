@@ -109,24 +109,101 @@ def _normalize_code(code: str) -> str:
     return prefix + body
 
 
+import json
+from pathlib import Path
+
+# 本地代码清单缓存路径
+CODES_CACHE_FILE = Path(__file__).resolve().parent / "data" / "codes_cache.json"
+
+import concurrent.futures
+
 # ====================== 2. 拉代码清单（同步，run_in_executor 调用）======================
+def _fetch_from_sina_codes() -> list[dict[str, str]]:
+    """备用源：从新浪行情中心拉全量 A 股（5,500+ 只）"""
+    sess = requests.Session()
+    sess.trust_env = False
+    headers = {"Referer": "http://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}
+    
+    def _fetch_page(p: int) -> list[dict[str, str]]:
+        url = (
+            f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+            f"Market_Center.getHQNodeData?page={p}&num=100&sort=symbol&asc=1&node=hs_a&symbol=&_s_r_a=init"
+        )
+        try:
+            r = sess.get(url, headers=headers, timeout=5)
+            data = r.json()
+            if isinstance(data, list):
+                res = []
+                for item in data:
+                    sym = str(item.get("symbol", "")).strip().lower()
+                    nm = str(item.get("name", "")).strip()
+                    if sym:
+                        res.append({"code": sym, "name": nm})
+                return res
+        except Exception:
+            pass
+        return []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        pages = list(executor.map(_fetch_page, range(1, 60)))
+    return [it for page in pages for it in page]
+
+
 def fetch_all_codes_sync() -> list[dict[str, str]]:
-    """从 akshare 拉全 A 股代码清单。返回 ``[{"code": "sh600000", "name": "..."}, ...]``。"""
-    df = ak.stock_info_a_code_name()
+    """从 akshare 拉全 A 股代码清单。返回 ``[{"code": "sh600000", "name": "..."}, ...]``。
+    
+    若网络/SSL异常，自动降级从新浪或本地 data/codes_cache.json 读取。
+    成功获取后自动更新本地磁盘缓存。
+    """
     out: list[dict[str, str]] = []
-    for _, row in df.iterrows():
-        raw_code = str(row.get("code", "")).strip()
-        name = str(row.get("code_name", "")).strip()
-        code = _normalize_code(raw_code)
-        if code and code != "sh" + "0" * 6:  # 过滤异常空代码
-            out.append({"code": code, "name": name})
-    # 去重（akshare 偶尔有重复行）
+    # 1. 尝试 akshare
+    try:
+        df = ak.stock_info_a_code_name()
+        for _, row in df.iterrows():
+            raw_code = str(row.get("code", "")).strip()
+            name = str(row.get("code_name", "")).strip()
+            code = _normalize_code(raw_code)
+            if code and code != "sh" + "0" * 6:
+                out.append({"code": code, "name": name})
+    except Exception as e:
+        logger.warning("ak.stock_info_a_code_name failed: %r, trying sina fallback", e)
+
+    # 2. 尝试新浪备用源
+    if len(out) < 3000:
+        try:
+            sina_codes = _fetch_from_sina_codes()
+            if len(sina_codes) > len(out):
+                out = sina_codes
+        except Exception as e:
+            logger.warning("sina fallback failed: %r, trying disk cache", e)
+
+    # 去重
     seen: set[str] = set()
     uniq: list[dict[str, str]] = []
     for item in out:
         if item["code"] not in seen:
             seen.add(item["code"])
             uniq.append(item)
+
+    if len(uniq) >= 3000:
+        # 成功拉取到，存盘备用
+        try:
+            CODES_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CODES_CACHE_FILE.write_text(json.dumps(uniq, ensure_ascii=False), encoding="utf-8")
+        except Exception as e:
+            logger.warning("save CODES_CACHE_FILE failed: %r", e)
+        return uniq
+
+    # 3. 如果为空且存在磁盘缓存，从磁盘读取
+    if CODES_CACHE_FILE.exists():
+        try:
+            cached_data = json.loads(CODES_CACHE_FILE.read_text(encoding="utf-8"))
+            if isinstance(cached_data, list) and cached_data:
+                logger.info("loaded %d stock codes from local cache fallback", len(cached_data))
+                return cached_data
+        except Exception as e:
+            logger.warning("read CODES_CACHE_FILE failed: %r", e)
+
     return uniq
 
 
@@ -359,7 +436,7 @@ async def fetch_watchlist_prices(codes: list[str]) -> int:
 
 def get_all_stocks() -> dict[str, dict[str, Any]]:
     """返回所有股票快照（去掉 ``__meta__``）。"""
-    return {k: v for k, v in all_stocks_cache.items() if k != "__meta__"}
+    return {k: v for k, v in list(all_stocks_cache.items()) if k != "__meta__"}
 
 
 def get_meta() -> dict[str, Any]:
