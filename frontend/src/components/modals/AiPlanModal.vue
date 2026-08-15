@@ -168,6 +168,55 @@ function fmtPct(v) {
           </div>
         </div>
 
+        <!-- 🎯 v4.3 真实支撑位/压力位/ATR 引擎矩阵（基于 MA20 / 箱体 / ATR 动态） -->
+        <div v-if="props.planData?.explain?.ambush_levels" class="rpt-panel-sub p-2.5 space-y-2">
+          <div class="flex items-center justify-between">
+            <div class="font-bold text-purple-300 text-[11px] flex items-center gap-1">
+              🎯 真实支撑/压力矩阵（量化引擎 · v4.3）
+            </div>
+            <span v-if="props.planData.explain.ambush_levels.volatility_tag" class="rpt-badge bg-purple-900/60 text-purple-200 border border-purple-700 font-mono text-[10px]">
+              {{ props.planData.explain.ambush_levels.volatility_tag }}
+            </span>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 font-mono text-[11px]">
+            <div class="bg-emerald-950/40 p-1.5 rounded border border-emerald-800/50">
+              <div class="text-emerald-400 font-bold text-[10px]">🛡️ 真实支撑</div>
+              <div class="text-emerald-200 font-bold mt-0.5">¥{{ fmtPrice(props.planData.explain.ambush_levels.support_price) }}</div>
+              <div class="text-emerald-500/80 text-[9px] mt-0.5 truncate" :title="props.planData.explain.ambush_levels.support_name">
+                {{ props.planData.explain.ambush_levels.support_name }}
+              </div>
+            </div>
+            <div class="bg-red-950/40 p-1.5 rounded border border-red-800/50">
+              <div class="text-red-400 font-bold text-[10px]">🏔️ 真实压力</div>
+              <div class="text-red-200 font-bold mt-0.5">¥{{ fmtPrice(props.planData.explain.ambush_levels.resistance_price) }}</div>
+              <div class="text-red-500/80 text-[9px] mt-0.5 truncate" :title="props.planData.explain.ambush_levels.resistance_name">
+                {{ props.planData.explain.ambush_levels.resistance_name }}
+              </div>
+            </div>
+            <div class="bg-slate-900/80 p-1.5 rounded border border-slate-800">
+              <div class="text-slate-400 font-bold text-[10px]">📏 ATR 波动</div>
+              <div class="text-slate-200 font-bold mt-0.5">¥{{ fmtPrice(props.planData.explain.ambush_levels.atr) }}</div>
+              <div class="text-slate-500 text-[9px] mt-0.5">20日波动率 {{ props.planData.explain.ambush_levels.volatility_pct }}%</div>
+            </div>
+            <div class="bg-amber-950/30 p-1.5 rounded border border-amber-800/40">
+              <div class="text-amber-400 font-bold text-[10px]">🎯 建议埋伏区间</div>
+              <div class="text-amber-200 font-bold mt-0.5">
+                <template v-if="props.planData.explain.ambush_levels.ambush_zone">
+                  ¥{{ fmtPrice(props.planData.explain.ambush_levels.ambush_zone[0]) }} ~ ¥{{ fmtPrice(props.planData.explain.ambush_levels.ambush_zone[1]) }}
+                </template>
+                <template v-else>--</template>
+              </div>
+              <div class="text-amber-500/80 text-[9px] mt-0.5">紧贴支撑位低吸</div>
+            </div>
+          </div>
+
+          <!-- 引擎技术面解读 -->
+          <p v-if="props.planData.explain.ambush_levels.technical_basis" class="text-[11px] text-slate-300 bg-slate-900/60 p-2 rounded border border-slate-800 leading-relaxed">
+            <span class="text-purple-300 font-bold">📐 引擎解读：</span>{{ props.planData.explain.ambush_levels.technical_basis }}
+          </p>
+        </div>
+
         <!-- 🛠️ 计划参数微调表单 -->
         <div class="space-y-2.5 pt-1">
           <div class="font-bold text-slate-200">

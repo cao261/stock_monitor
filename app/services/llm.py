@@ -109,7 +109,18 @@ def build_messages(summary: dict) -> list[dict]:
 PLAN_SYSTEM_PROMPT = (
     "你是【前瞻性交易领航员】，擅长结合技术面 K 线形态与用户的【真实持仓成本与盈亏画像】"
     "提炼出高度个性化、有深度、可执行的操盘规划与风控决策。\n"
-    "你只输出【严格合法 JSON】，不要任何 markdown 包裹、不要解释性文字、不要前后缀。"
+    "你只输出【严格合法 JSON】，不要任何 markdown 包裹、不要解释性文字、不要前后缀。\n\n"
+    "【关键原则 v4.3：支撑位/压力位必须基于真实技术面】\n"
+    "1. 我们已经喂给你【精准量化引擎】算出的【真实支撑位 support_price】【真实压力位 resistance_price】\n"
+    "   以及【波动类型 volatility_tag】和【埋伏区间 ambush_zone】。\n"
+    "2. 你的 entry_price_min / entry_price_max **必须基于 ambush_zone** 来微调（可向两端各扩 0.5%~1.5%）；\n"
+    "3. 你的 target_win **应参考 resistance_price**（取 max(resistance_price, current_price * 1.05)），\n"
+    "   **不要**给低于压力位的目标止盈（否则没有突破压力就没有上涨空间）；\n"
+    "4. 你的 target_loss **应贴近 support_price**（取 max(stop_loss_engine, support_price * 0.97)），\n"
+    "   **不要**设得太紧（用户因洗盘被洗掉）或太松（止损 > 5% 没意义）。\n"
+    "5. 【务必】在 rationale 里明确写出「支撑 ¥X / 压力 ¥Y / 当前价 ¥Z 距离支撑 Z% 距离压力 Z%」\n"
+    "   让用户一眼看清攻防位置。\n"
+    "6. 【务必】在 trade_note 末尾或前面，加一句明确的「🛡️ 关键支撑 ¥X / 🏔️ 第一压力 ¥Y」。"
 )
 
 PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股标的生成个性化前瞻操盘规划：
@@ -128,33 +139,50 @@ PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股标的生成个性化前瞻操�
 - 原有止盈设定：{existing_target_win}
 - 原有止损设定：{existing_target_loss}
 
-【50 天技术特征摘要】
+【50 天技术特征摘要（MA / ATR / 趋势 / 量能）】
 {features_json}
+
+【🎯 精准量化技术面（核心参考）—— 真实支撑/压力/ATR 引擎已为你算好】
+- 真实关键支撑位: ¥{support_price} ({support_name})
+- 真实第一压力位: ¥{resistance_price} ({resistance_name})
+- ATR 14日波动率: ¥{atr}（单日/单根 K 线的平均真实波幅）
+- 20日波动率: {volatility_pct}%
+- 波动类型: {volatility_tag}
+- 建议埋伏区间: [¥{ambush_zone_lo} ~ ¥{ambush_zone_hi}]
+- 引擎建议止盈: ¥{engine_target_win}
+- 引擎建议止损: ¥{engine_stop_loss}
+- 引擎技术面解读: {technical_basis}
+
+→ 你必须把上面的"精准量化"作为建仓甜区/止盈止损的【硬约束】，不要随意脱离。
 
 【最近 10 天原始 K 线 (OHLCV，单位：元/手)】
 {ohlcv_json}
 
 【领航员决策核心准则】
 1. **若用户有持仓**：
-   - 必须深度参考用户的【成本价与浮盈/浮亏现状】制定针对性策略！
-   - 浮盈丰厚（收益率 > +10%）：重点指导如何保住利润（建议向上移动保本止盈线，在上方阻力位分批减半仓锁利）；
-   - 成本线附近（收益率 -3% ~ +3%）：分析当前蓄势与量能，明确继续持有还是借冲高调仓；
-   - 深度浮亏（收益率 < -5%）：结合关键支撑位与均线，给出坚决止损、反弹减仓或金字塔左侧补仓摊薄成本的明确操作指导；
-   - entry_price_min/max 应设为建议的【最佳补仓/加仓买点区间】；
-   - target_win / target_loss 必须与用户实际成本价匹配，形成合理盈亏比。
+   - 必须深度参考用户的【成本价与浮盈/浮亏现状】+【真实支撑/压力位】制定针对性策略！
+   - 浮盈丰厚（收益率 > +10%）：重点指导如何保住利润（在第一压力位阻力区 ¥{resistance_price} 分批减半仓锁利）
+   - 成本线附近（收益率 -3% ~ +3%）：分析当前距支撑 ¥{support_price} 与压力 ¥{resistance_price} 的位置，明确继续持有还是借冲高调仓
+   - 深度浮亏（收益率 < -5%）：评估当前价距支撑 ¥{support_price} 还差多少，给出止损/补仓摊薄/观望的明确操作
+   - entry_price_min/max 应贴近【引擎埋伏区间】，但可根据用户成本做 ±1% 微调
 2. **若用户空仓**：
-   - 聚焦于【首次建仓最佳甜区 (entry_price_min ~ entry_price_max)】、买入触发条件与前瞻止盈止损。
+   - 聚焦于【首次建仓最佳甜区】—— entry_price_min/max 必须以【引擎埋伏区间】为锚点 ±1%
+   - target_loss 紧贴真实支撑位下方（建议 ¥{engine_stop_loss} 附近）
+   - target_win 锁定第一压力位（建议 ¥{resistance_price} 上方 0~3%）
 
 【输出 schema — 严格合法 JSON】
 {{
-  "entry_price_min": float,      // 理想建仓/补仓下限（元）
-  "entry_price_max": float,      // 理想建仓/补仓上限（元）
-  "target_win": float,           // 建议止盈目标价（元）
-  "target_loss": float,          // 建议防守止损价（元）
-  "position_advice": string,     // 针对当前持仓状态的核心操作指令（如 "加仓待涨" / "逢高锁利" / "防守减仓" / "观望等待" / "持股待突破"）
-  "trade_note": string,          // ≤120 字的个性化策略简述（结合成本与K线，包含操作节奏与风控要求）
-  "rationale": string,           // ≤80 字的决策依据（明确指出成本价、盈亏比例与技术面共振逻辑）
-  "tags": [string, ...]          // 策略标签：["放量突破"] / ["移动锁利"] / ["支撑位低吸"] / ["左侧定投"] / ["反弹减仓"] 等
+  "entry_price_min": float,      // 理想建仓/补仓下限（元，贴近引擎埋伏区间）
+  "entry_price_max": float,      // 理想建仓/补仓上限（元，贴近引擎埋伏区间）
+  "target_win": float,           // 建议止盈目标价（元，参考压力位）
+  "target_loss": float,          // 建议防守止损价（元，参考支撑位）
+  "support_price": float,        // 复制引擎算出的真实支撑位
+  "resistance_price": float,     // 复制引擎算出的真实压力位
+  "volatility_tag": string,      // 复制波动类型标签（如 "📈 稳健成长型"）
+  "position_advice": string,     // 针对当前持仓状态的核心操作指令
+  "trade_note": string,          // ≤150 字的个性化策略简述
+  "rationale": string,           // ≤120 字的决策依据（明确指出成本、盈亏、技术面共振、关键支撑压力位置）
+  "tags": [string, ...]          // 策略标签
 }}
 
 注意：
@@ -162,7 +190,8 @@ PLAN_USER_PROMPT_TEMPLATE = """请为以下 A 股标的生成个性化前瞻操�
 2. entry_price_min 必须 < entry_price_max
 3. target_loss 必须 < entry_price_min
 4. target_win 必须 > entry_price_max
-5. 策略必须针对用户的持仓状态（有仓还是空仓、赚还是赔）给出针对性建议，严禁假大空的套话
+5. support_price / resistance_price 字段**必须直接复制**上面给你的真实值（不要瞎编）
+6. strategy 必须针对用户的持仓状态 + 真实支撑压力位给出针对性建议
 
 请直接输出 JSON："""
 
@@ -174,8 +203,14 @@ def build_plan_messages(
     features: dict,
     ohlcv_10d: list[dict],
     holding_info: dict | None = None,
+    ambush_levels: dict | None = None,
 ) -> list[dict]:
-    """打包 AI 智能规划用的 messages（注入持仓画像与个性化决策上下文）。"""
+    """打包 AI 智能规划用的 messages（注入持仓画像 + 精准支撑/压力 + 个性化决策上下文）。
+
+    v4.3 新增：ambush_levels 来自 ``analyzer.calculate_stock_ambush_levels``，
+    包含真实支撑位/压力位/ATR/波动类型/埋伏区间/引擎止盈止损等，让 LLM 的
+    entry_price_min/max/target_win/target_loss 有量化锚点，而不是凭感觉写。
+    """
     h = holding_info or {}
     has_pos = h.get("has_position", False)
     cost = h.get("cost_price")
@@ -191,6 +226,20 @@ def build_plan_messages(
     existing_note = str(h.get("existing_trade_note") or "无").strip()
     existing_tw = f"¥{h.get('existing_target_win'):.2f} 元" if h.get("existing_target_win") is not None else "未设"
     existing_tl = f"¥{h.get('existing_target_loss'):.2f} 元" if h.get("existing_target_loss") is not None else "未设"
+
+    # v4.3: 精准量化技术面（引擎输出），容错兜底
+    al = ambush_levels or {}
+    support_price = al.get("support_price")
+    support_name = al.get("support_name") or "动态支撑"
+    resistance_price = al.get("resistance_price")
+    resistance_name = al.get("resistance_name") or "动态压力"
+    atr = al.get("atr")
+    vol_pct = al.get("volatility_pct")
+    vol_tag = al.get("volatility_tag") or "波动类型未知"
+    zone = al.get("ambush_zone") or [None, None]
+    eng_tw = al.get("target_win")
+    eng_sl = al.get("stop_loss")
+    basis = al.get("technical_basis") or "无技术面摘要"
 
     return [
         {"role": "system", "content": PLAN_SYSTEM_PROMPT},
@@ -209,6 +258,18 @@ def build_plan_messages(
                 existing_target_win=existing_tw,
                 existing_target_loss=existing_tl,
                 features_json=json.dumps(features, ensure_ascii=False, indent=2),
+                support_price=f"{support_price:.2f}" if support_price is not None else "未知",
+                support_name=support_name,
+                resistance_price=f"{resistance_price:.2f}" if resistance_price is not None else "未知",
+                resistance_name=resistance_name,
+                atr=f"{atr:.2f}" if atr is not None else "未知",
+                volatility_pct=f"{vol_pct:.2f}" if vol_pct is not None else "未知",
+                volatility_tag=vol_tag,
+                ambush_zone_lo=f"{zone[0]:.2f}" if zone and zone[0] is not None else "未知",
+                ambush_zone_hi=f"{zone[1]:.2f}" if zone and zone[1] is not None else "未知",
+                engine_target_win=f"{eng_tw:.2f}" if eng_tw is not None else "未知",
+                engine_stop_loss=f"{eng_sl:.2f}" if eng_sl is not None else "未知",
+                technical_basis=basis,
                 ohlcv_json=json.dumps(ohlcv_10d, ensure_ascii=False, indent=2),
             ),
         },
@@ -353,8 +414,11 @@ _PLAN_RANGES = {
 }
 
 
-def _sanitize_plan(raw: dict, current_price: float | None = None) -> dict:
+def _sanitize_plan(raw: dict, current_price: float | None = None, ambush_levels: dict | None = None) -> dict:
     """清洗 + 兜底 LLM 返回的建仓计划。
+
+    v4.3: 增加 support_price / resistance_price / volatility_tag 字段提取与兜底
+    （以引擎输出为准，LLM 输出为参考）。
 
     不变量：
     - entry_price_min < entry_price_max
@@ -365,6 +429,9 @@ def _sanitize_plan(raw: dict, current_price: float | None = None) -> dict:
     if not isinstance(raw, dict):
         raw = {}
     out: dict = {}
+    # v4.3: 引擎真实支撑/压力/波动类型（以引擎为权威，LLM 输出为参考），提前到顶部避免
+    # 后续 if 块内引用时被 Python 判 UnboundLocalError。
+    al = ambush_levels or {}
 
     def _f(key, default=None):
         v = raw.get(key)
@@ -384,19 +451,40 @@ def _sanitize_plan(raw: dict, current_price: float | None = None) -> dict:
     out["target_win"] = _f("target_win")
     out["target_loss"] = _f("target_loss")
 
-    # 兜底：entry_price_min/max 至少有一个
-    if out["entry_price_min"] is None and out["entry_price_max"] is None and current_price:
-        # 以当前价 ± 5% 作保守兜底
-        out["entry_price_min"] = round(current_price * 0.95, 4)
-        out["entry_price_max"] = round(current_price * 1.05, 4)
+    # v4.3: 兜底首选 — 用引擎算的 ambush_levels（即使 cache miss 也有引擎数据）
+    al_sp = al.get("support_price")
+    al_rp = al.get("resistance_price")
+    al_z = al.get("ambush_zone") or [None, None]
+
+    # 兜底：entry_price_min/max 至少有一个（先 current_price，再 ambush_levels）
+    if out["entry_price_min"] is None and out["entry_price_max"] is None:
+        if current_price:
+            out["entry_price_min"] = round(current_price * 0.95, 4)
+            out["entry_price_max"] = round(current_price * 1.05, 4)
+        elif al_z[0] is not None and al_z[1] is not None:
+            out["entry_price_min"] = al_z[0]
+            out["entry_price_max"] = al_z[1]
+        elif al_sp is not None:
+            out["entry_price_min"] = round(al_sp * 0.99, 4)
+            out["entry_price_max"] = round(al_sp * 1.01, 4)
 
     # 兜底：target_win 至少 > current_price
-    if out["target_win"] is None and current_price and out["entry_price_max"]:
-        out["target_win"] = round(current_price * 1.10, 4)
+    if out["target_win"] is None:
+        if current_price and out["entry_price_max"]:
+            out["target_win"] = round(current_price * 1.10, 4)
+        elif al_rp is not None:
+            out["target_win"] = round(al_rp * 1.02, 4)
+        elif out["entry_price_max"]:
+            out["target_win"] = round(out["entry_price_max"] * 1.08, 4)
 
     # 兜底：target_loss 至少 < current_price
-    if out["target_loss"] is None and current_price and out["entry_price_min"]:
-        out["target_loss"] = round(current_price * 0.92, 4)
+    if out["target_loss"] is None:
+        if current_price and out["entry_price_min"]:
+            out["target_loss"] = round(current_price * 0.92, 4)
+        elif al_sp is not None:
+            out["target_loss"] = round(al_sp * 0.96, 4)
+        elif out["entry_price_min"]:
+            out["target_loss"] = round(out["entry_price_min"] * 0.95, 4)
 
     # 不变量校验：min < max
     if out["entry_price_min"] and out["entry_price_max"]:
@@ -418,6 +506,32 @@ def _sanitize_plan(raw: dict, current_price: float | None = None) -> dict:
     out["position_advice"] = str(raw.get("position_advice", "")).strip()[:50] or None
     out["trade_note"] = str(raw.get("trade_note", "")).strip()[:500] or None
     out["rationale"] = str(raw.get("rationale", "")).strip()[:300] or None
+
+    # v4.3 兜底：当 LLM JSON 解析失败 / 输出空时（价格字段已用 current_price 兜底），
+    # 自动生成简要的 position_advice / trade_note / rationale，避免前端展示空白。
+    if not out["position_advice"]:
+        out["position_advice"] = _default_position_advice(al, current_price)
+    if not out["trade_note"]:
+        out["trade_note"] = _default_trade_note(al, current_price)
+    if not out["rationale"]:
+        out["rationale"] = _default_rationale(al, current_price)
+
+    # v4.3: 真实支撑/压力/波动类型（以引擎输出为权威，LLM 输出为参考）
+    raw_sp = raw.get("support_price")
+    try:
+        llm_sp = float(raw_sp) if raw_sp is not None and raw_sp != "" else None
+    except (TypeError, ValueError):
+        llm_sp = None
+    out["support_price"] = llm_sp if (llm_sp and llm_sp > 0) else al.get("support_price")
+
+    raw_rp = raw.get("resistance_price")
+    try:
+        llm_rp = float(raw_rp) if raw_rp is not None and raw_rp != "" else None
+    except (TypeError, ValueError):
+        llm_rp = None
+    out["resistance_price"] = llm_rp if (llm_rp and llm_rp > 0) else al.get("resistance_price")
+
+    out["volatility_tag"] = str(raw.get("volatility_tag", "")).strip()[:80] or al.get("volatility_tag")
 
     # tags: list[str]，去空 + 去重
     raw_tags = raw.get("tags", []) or []
@@ -443,8 +557,15 @@ async def generate_ai_plan(
     features: dict,
     ohlcv_10d: list[dict],
     holding_info: dict | None = None,
+    history_data: list[dict] | None = None,
 ) -> dict:
-    """v4.0+: 给定股票技术特征 + 最近 10 天 OHLCV + 个人持仓成本画像，生成个性化操盘规划。
+    """v4.3+: 给定股票技术特征 + 最近 10 天 OHLCV + 个人持仓成本画像 + 真实支撑/压力位，生成个性化操盘规划。
+
+    v4.3 新增：内部调用 ``analyzer.calculate_stock_ambush_levels`` 算精准支撑位/压力位/ATR/埋伏区间，
+    把这些作为【硬锚点】喂给 LLM，让 LLM 的 entry_price_min/max/target_win/target_loss 有真实量化依据。
+
+    Args:
+        history_data: 用于内部计算 ambush_levels 的 K 线数据（features 之外的原始数据）
 
     Returns:
         dict: {
@@ -452,14 +573,29 @@ async def generate_ai_plan(
             "entry_price_max": float | None,
             "target_win": float | None,
             "target_loss": float | None,
+            "support_price": float | None,        # v4.3 新增：复制引擎算出的真实支撑位
+            "resistance_price": float | None,     # v4.3 新增：复制引擎算出的真实压力位
+            "volatility_tag": str | None,         # v4.3 新增：波动类型标签
             "position_advice": str | None,
             "trade_note": str | None,
             "rationale": str | None,
             "tags": list[str],
         }
     """
+    # v4.3: 算精准支撑/压力（也作为响应回传前端，UI 能直接展示真实技术位）
+    from analyzer import calculate_stock_ambush_levels
+    ambush_levels = calculate_stock_ambush_levels(
+        code=ts_code,
+        cur_price=current_price,
+        history_records=history_data,
+    )
+
     client = _get_client()
-    messages = build_plan_messages(ts_code, name, current_price, features, ohlcv_10d, holding_info=holding_info)
+    messages = build_plan_messages(
+        ts_code, name, current_price, features, ohlcv_10d,
+        holding_info=holding_info,
+        ambush_levels=ambush_levels,
+    )
     logger.info(
         "calling LLM (ai-plan): model=%s ts_code=%s holding=%s features=%d keys ohlcv=%d bars",
         config.LLM_MODEL_NAME, ts_code, bool(holding_info and holding_info.get('has_position')), len(features), len(ohlcv_10d),
@@ -478,7 +614,7 @@ async def generate_ai_plan(
     logger.info("ai-plan raw content: %s", content[:200])
 
     raw = _parse_plan_json(content)
-    plan = _sanitize_plan(raw, current_price=current_price)
+    plan = _sanitize_plan(raw, current_price=current_price, ambush_levels=ambush_levels)
 
     # 关键字段必须至少有 entry_price_min + entry_price_max
     if plan["entry_price_min"] is None or plan["entry_price_max"] is None:
@@ -546,6 +682,36 @@ DISCOVER_USER_PROMPT = """请基于以下真实的多维市场数据（政策催
   - stock_logic: ≤40 字的个股专属埋伏理由与支撑依据（如 "依托20日均线支撑低吸，估值处于历史底部"）
 - level: 爆发确定性（"高" / "中"）
 - risk_warning: ≤50 字的风控与认错撤退纪律
+- tech_indicators: 数组（**v4.3 新增：技术指标明细，3~5 条**，让感兴趣的用户一眼看清技术面为什么利多）：
+    [
+      {{
+        "name": "指标名",
+        "value": "数值或趋势描述",
+        "signal": "利多/利空/中性",
+        "comment": "≤30 字的指标意义说明"
+      }},
+      ...
+    ]
+  - 示例：
+    [
+      {{"name": "MA20 趋势", "value": "1.475 元 (向上)", "signal": "利多", "comment": "股价站上 MA20，短线多头占优"}},
+      {{"name": "MACD", "value": "DIF 上穿 DEA", "signal": "利多", "comment": "底部金叉确立"}},
+      {{"name": "量能趋势", "value": "近 5 日均量 vs 前 5 日", "signal": "中性", "comment": "缩量企稳，蓄势待发"}},
+      {{"name": "20日波动率", "value": "2.8%", "signal": "利多", "comment": "波动收敛，主力吸筹迹象"}},
+      {{"name": "连阳/连阴", "value": "3 连阳", "signal": "利多", "comment": "短线动能转强"}}
+    ]
+- news_highlights: 数组（**v4.3 新增：消息面利好点，2~4 条**，从给定的 {n_news} 条新闻里精挑与本方向强相关的）：
+    [
+      {{
+        "title": "新闻标题（精简）",
+        "time": "时间（HH:MM）",
+        "source": "新闻源（财联社/新浪等）",
+        "why_relevant": "≤40 字解释为什么对本方向利多"
+      }},
+      ...
+    ]
+  - 必须从上面给出的【消息面原始清单】里挑，不要自己编造新闻！
+  - 选 news 的标准：标题/关键词与本方向板块强相关（题材、政策、产业链、技术突破）
 
 【输出 schema（严格 JSON）】
 {{
@@ -558,6 +724,8 @@ DISCOVER_USER_PROMPT = """请基于以下真实的多维市场数据（政策催
       "catalyst_logic": "前瞻催化事件分析与市场预期差...",
       "technical_pattern": "底部均线粘合，成交量极度收敛...",
       "breakout_trigger": "放量站上XX元压力位",
+      "tech_indicators": [...],
+      "news_highlights": [...],
       "stocks": [
         {{
           "code": "sh600xxx",
@@ -763,6 +931,8 @@ def _generate_fallback_discoveries(
             "catalyst_logic": "核心产业政策预期发酵，主力资金呈持续净流入态势。市场此前因担忧落地节奏存在预期差，当前具备左侧潜伏价值。",
             "technical_pattern": "板块回踩 20 日均线支撑企稳，成交量温和收敛，个股在箱体底部形成多头排列。",
             "breakout_trigger": "放量突破近期箱体上轨压力位并伴随成交量放大 1.3 倍以上",
+            "tech_indicators": _build_default_tech_indicators({"stocks": stks1}),
+            "news_highlights": _match_news_for_sector(sec1, news) if news else [],
             "stocks": stks1,
             "level": "高",
             "risk_warning": "若跌破各标的关键均线支撑位应严格执行纪律止损。",
@@ -784,6 +954,8 @@ def _generate_fallback_discoveries(
             "catalyst_logic": "前期调整充分，近期抛压衰竭，行业基本面景气度具备向上复苏反弹动能。",
             "technical_pattern": "日线级别均线粘合向上发散，5 日量比小于 0.8 呈现典型地量见底蓄势特征。",
             "breakout_trigger": "5 日均线上穿 20 日均线形成金叉且单日涨幅超过 2.5%",
+            "tech_indicators": _build_default_tech_indicators({"stocks": stks2}),
+            "news_highlights": _match_news_for_sector(sec2, news) if news else [],
             "stocks": stks2,
             "level": "中",
             "risk_warning": "若成交量持续萎缩无法突破上方第一强阻力，可逢反弹分批减仓。",
@@ -805,11 +977,158 @@ def _generate_fallback_discoveries(
             "catalyst_logic": "高位龙头分歧调整后，活跃资金分流至同题材估值处于历史低位的配套产业链标的。",
             "technical_pattern": "低位双底筑底形态初显，MACD 底部金叉，具备补涨弹性空间。",
             "breakout_trigger": "板块内出现首板涨停标的带动低位补涨梯队放量启动",
+            "tech_indicators": _build_default_tech_indicators({"stocks": stks3}),
+            "news_highlights": _match_news_for_sector(sec3, news) if news else [],
             "stocks": stks3,
             "level": "中",
             "risk_warning": "补涨行情轮动速度较快，达到建议目标止盈位应果断止盈。",
         })
 
+    return out
+
+
+# ====================== v4.3: ai-plan 字段兜底（LLM 输出空/坏 JSON 时）======================
+def _default_position_advice(al: dict, current_price: float | None) -> str:
+    """当 LLM 没给出 position_advice 时，基于引擎位置自动给一个稳健指令。"""
+    sp = al.get("support_price")
+    rp = al.get("resistance_price")
+    if current_price and sp and rp:
+        # 现价在中段 → 观望；近支撑 → 低吸；近压力 → 兑现
+        mid = (sp + rp) / 2
+        if current_price <= sp * 1.02:
+            return "🛡️ 支撑位低吸"
+        if current_price >= rp * 0.98:
+            return "🏔️ 压力位兑现"
+        if current_price < mid:
+            return "👀 蓄势低吸"
+        return "👀 蓄势等待"
+    return "👀 观望等待"
+
+
+def _default_trade_note(al: dict, current_price: float | None) -> str:
+    sp = al.get("support_price")
+    rp = al.get("resistance_price")
+    if sp and rp:
+        return f"🛡️ 关键支撑 ¥{sp:.2f} / 🏔️ 第一压力 ¥{rp:.2f}。在支撑位附近分批低吸，到压力位减半仓，跌破支撑坚决止损。"
+    return "建议参考真实技术面（支撑/压力）制定纪律化操作计划"
+
+
+def _default_rationale(al: dict, current_price: float | None) -> str:
+    sp = al.get("support_price")
+    rp = al.get("resistance_price")
+    if current_price and sp and rp:
+        dist_sp = (current_price - sp) / sp * 100
+        dist_rp = (rp - current_price) / current_price * 100
+        return f"现价 ¥{current_price:.2f}：距真实支撑 ¥{sp:.2f} {dist_sp:+.1f}%，距真实压力 ¥{rp:.2f} 仍有 {dist_rp:+.1f}% 上行空间。盈亏比由真实技术位决定。"
+    if sp and rp:
+        return f"关键支撑 ¥{sp:.2f}，第一压力 ¥{rp:.2f}，策略应以这两个价位为锚点。"
+    return "参考量化引擎算出的真实支撑/压力位制定策略"
+
+
+# ====================== v4.3: tech_indicators / news_highlights 兜底 ======================
+def _build_default_tech_indicators(discovery: dict) -> list[dict]:
+    """LLM 没输出 tech_indicators 时，根据 discovery 的 stocks 算几个核心指标作为兜底。"""
+    stocks = discovery.get("stocks") or []
+    if not stocks:
+        return []
+    # 取第一只标的的 ambush_levels（如果有），算 MA20 / ATR 等
+    stk = stocks[0]
+    out: list[dict] = []
+
+    support = stk.get("support_price")
+    resistance = stk.get("resistance_price")
+    cur = stk.get("current_price")
+    vol_tag = stk.get("volatility_tag") or ""
+
+    if cur and support:
+        dist = (cur - support) / support * 100 if support > 0 else 0
+        sig = "利多" if dist < 5 else ("中性" if dist < 10 else "利空")
+        out.append({
+            "name": "现价距真实支撑",
+            "value": f"{dist:+.1f}%",
+            "signal": sig,
+            "comment": f"距支撑 ¥{support:.2f} 较近，回踩即埋伏区" if sig == "利多" else f"距支撑 ¥{support:.2f} 已拉开"
+        })
+    if cur and resistance:
+        dist = (resistance - cur) / cur * 100 if cur > 0 else 0
+        sig = "利多" if dist > 2 else "中性"
+        out.append({
+            "name": "上行空间（至第一压力）",
+            "value": f"+{dist:.1f}%",
+            "signal": sig,
+            "comment": f"距离压力 ¥{resistance:.2f} 仍有空间"
+        })
+    if vol_tag:
+        out.append({
+            "name": "波动属性",
+            "value": vol_tag,
+            "signal": "中性",
+            "comment": "波动率决定仓位和止盈空间",
+        })
+    if not out:
+        out.append({
+            "name": "低位埋伏",
+            "value": "缩量企稳",
+            "signal": "利多",
+            "comment": "处于低位蓄势区间，可考虑分批建仓",
+        })
+    return out[:5]
+
+
+def _match_news_for_sector(sector: str, news: list[dict]) -> list[dict]:
+    """从原始新闻池按 sector 关键词匹配 2~3 条最相关的消息作为 news_highlights 兜底。
+
+    匹配规则：把 sector 拆成 2~3 字关键词（含滑窗），新闻标题里出现任一关键词就视为相关。
+    匹配不到时退化到 news 池的前 2 条作为"近期催化概览"。
+    """
+    if not sector or not news:
+        return []
+    import re as _re
+    # 1) 按标点切分得到主词
+    parts = _re.split(r"[\s,，、/／与和及()()（）]+", sector)
+    base_keywords = [p for p in parts if len(p) >= 2][:5]
+    # 2) 滑窗拆出 2~3 字子词（处理 "液冷服务器" → "液冷" / "冷却" / "服务器"）
+    keywords: set[str] = set(base_keywords)
+    for p in base_keywords:
+        for wlen in (2, 3):
+            for i in range(0, max(0, len(p) - wlen + 1)):
+                keywords.add(p[i:i + wlen])
+    if not keywords:
+        keywords = {sector[:4]}
+
+    out: list[dict] = []
+    for n in news:
+        title = (n.get("title") or n.get("content", "")[:80]) or ""
+        if not title:
+            continue
+        if any(kw in title for kw in keywords):
+            t = n.get("time", "")
+            if "T" in t:
+                t = t.split("T", 1)[1][:5]
+            out.append({
+                "title": str(title)[:80],
+                "time": t,
+                "source": str(n.get("source", "") or "")[:20],
+                "why_relevant": f"与「{sector}」题材关键词匹配",
+            })
+        if len(out) >= 3:
+            break
+
+    # 兜底：完全没匹配上时，给 news 池前 2 条作为"近期催化概览"
+    if not out:
+        for n in news[:2]:
+            title = (n.get("title") or n.get("content", "")[:80]) or ""
+            if not title:
+                continue
+            t = n.get("time", "")
+            if "T" in t:
+                t = t.split("T", 1)[1][:5]
+            out.append({
+                "title": str(title)[:80],
+                "time": t,
+                "source": str(n.get("source", "") or "")[:20],
+                "why_relevant": "近期市场关注热点（与本方向弱关联，仅供参考）",
+            })
     return out
 
 
@@ -853,6 +1172,57 @@ def _sanitize_discoveries(
         if level not in ("高", "中", "低", "观察"):
             level = "高"
 
+        # v4.3: 提取 tech_indicators（技术指标明细），允许 list/dict 多种形态
+        tech_indicators: list[dict] = []
+        for it in (d.get("tech_indicators") or [])[:6]:
+            if isinstance(it, dict):
+                nm = str(it.get("name", "")).strip()[:30]
+                if not nm:
+                    continue
+                sig = str(it.get("signal", "中性")).strip()[:10]
+                if sig not in ("利多", "利空", "中性"):
+                    sig = "中性"
+                tech_indicators.append({
+                    "name": nm,
+                    "value": str(it.get("value", "")).strip()[:50],
+                    "signal": sig,
+                    "comment": str(it.get("comment", "")).strip()[:80],
+                })
+            elif isinstance(it, str):
+                tech_indicators.append({
+                    "name": it.strip()[:30] or "技术指标",
+                    "value": "",
+                    "signal": "中性",
+                    "comment": "",
+                })
+        # 兜底：如果 LLM 没输出或全被过滤掉，根据 features 自动给 2-3 条
+        if not tech_indicators:
+            tech_indicators = _build_default_tech_indicators(d)
+
+        # v4.3: 提取 news_highlights（消息面利好点），从原始 news 中按关键词匹配
+        news_highlights: list[dict] = []
+        for nh in (d.get("news_highlights") or [])[:4]:
+            if isinstance(nh, dict):
+                ttl = str(nh.get("title", "")).strip()[:80]
+                if not ttl:
+                    continue
+                news_highlights.append({
+                    "title": ttl,
+                    "time": str(nh.get("time", "")).strip()[:8],
+                    "source": str(nh.get("source", "")).strip()[:20],
+                    "why_relevant": str(nh.get("why_relevant", "")).strip()[:120],
+                })
+            elif isinstance(nh, str):
+                news_highlights.append({
+                    "title": nh.strip()[:80],
+                    "time": "",
+                    "source": "",
+                    "why_relevant": "",
+                })
+        # 兜底：从原始 news 池中按 sector 关键词匹配 2-3 条
+        if not news_highlights and news:
+            news_highlights = _match_news_for_sector(sector, news)
+
         # 评分提取与计算
         score_val = d.get("score")
         try:
@@ -884,6 +1254,9 @@ def _sanitize_discoveries(
             "catalyst_logic": catalyst_logic,
             "technical_pattern": technical_pattern,
             "breakout_trigger": breakout_trigger,
+            # v4.3: 用户可点的详情展开区
+            "tech_indicators": tech_indicators,
+            "news_highlights": news_highlights,
             "stocks": stocks,
             "level": level,
             "risk_warning": risk_warning,

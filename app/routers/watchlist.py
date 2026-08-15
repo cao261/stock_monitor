@@ -589,6 +589,13 @@ async def ai_plan(
         ohlcv_days=10,
     )
 
+    # ===== 2.4 v4.3: 算精准支撑/压力/ATR/埋伏区间（同时回传给前端）=====
+    ambush_levels = analyzer.calculate_stock_ambush_levels(
+        code=obj.ts_code,
+        cur_price=current_price,
+        history_records=history_data,
+    )
+
     # ===== 2.5 组装用户个性化持仓画像与风控底账 =====
     cost_price = obj.cost_price
     position = obj.position
@@ -621,6 +628,7 @@ async def ai_plan(
             features=features,
             ohlcv_10d=ohlcv_10d,
             holding_info=holding_info,
+            history_data=history_data,  # v4.3: 内部算 ambush_levels 用
         )
     except ValueError as e:
         # LLM 输出 JSON 缺关键字段
@@ -660,6 +668,8 @@ async def ai_plan(
         "explain": {
             "features": features,
             "ohlcv_10d": ohlcv_10d,
+            # v4.3: 精准量化技术面（引擎真实值），前端 Modal 可直接显示
+            "ambush_levels": ambush_levels,
         },
         "model": config.LLM_MODEL_NAME,
     }

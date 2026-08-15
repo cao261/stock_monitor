@@ -1,4 +1,6 @@
 <script setup>
+import { reactive } from 'vue'
+
 const props = defineProps({
   show: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
@@ -25,6 +27,23 @@ function getScoreBadgeClass(score) {
   if (s >= 85) return 'bg-red-950 text-red-200 border-red-600 font-bold'
   if (s >= 75) return 'bg-amber-950 text-amber-200 border-amber-600 font-bold'
   return 'bg-slate-800 text-slate-300 border-slate-600 font-medium'
+}
+
+function getSignalBadgeClass(signal) {
+  if (signal === '利多') return 'bg-emerald-950/70 text-emerald-200 border-emerald-700'
+  if (signal === '利空') return 'bg-red-950/70 text-red-200 border-red-700'
+  return 'bg-slate-800 text-slate-300 border-slate-700'
+}
+
+// v4.3: 每个方向的"详情展开"折叠状态。key = direction index
+const expanded = reactive({})
+
+function toggleDetail(idx) {
+  expanded[idx] = !expanded[idx]
+}
+
+function hasDetail(item) {
+  return (item.tech_indicators && item.tech_indicators.length) || (item.news_highlights && item.news_highlights.length)
 }
 </script>
 
@@ -230,6 +249,83 @@ function getScoreBadgeClass(score) {
                     >
                       ➕ 设为自选监控
                     </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- v4.3: 📊 技术指标明细 + 📰 消息面利好点 展开区（用户感兴趣可点） -->
+            <div v-if="hasDetail(item)" class="space-y-2 pt-1">
+              <button
+                @click="toggleDetail(idx)"
+                class="w-full text-[11px] font-bold flex items-center justify-between px-3 py-1.5 rounded
+                       bg-slate-900/60 border border-slate-700/60 hover:border-blue-500/60 hover:bg-slate-800/60 transition"
+              >
+                <span class="flex items-center gap-2">
+                  <span class="text-blue-300">🔍</span>
+                  <span class="text-slate-200">感兴趣？展开技术指标 + 消息面利好点详情</span>
+                  <span class="rpt-badge bg-slate-800 text-slate-300 border border-slate-600 font-mono">
+                    {{ (item.tech_indicators?.length || 0) + (item.news_highlights?.length || 0) }} 项
+                  </span>
+                </span>
+                <span class="text-slate-400 font-mono">{{ expanded[idx] ? '▲ 收起' : '▼ 展开' }}</span>
+              </button>
+
+              <div v-if="expanded[idx]" class="space-y-2.5 p-2 rounded bg-slate-950/40 border border-slate-800">
+                <!-- 📊 技术指标明细 -->
+                <div v-if="item.tech_indicators?.length">
+                  <div class="text-[11px] font-bold text-cyan-300 mb-1.5 flex items-center gap-1">
+                    📊 技术指标明细
+                    <span class="text-slate-500 font-normal text-[10px]">（{{ item.tech_indicators.length }} 项）</span>
+                  </div>
+                  <div class="space-y-1">
+                    <div
+                      v-for="(ti, tii) in item.tech_indicators"
+                      :key="tii"
+                      class="grid grid-cols-12 gap-2 items-center text-[11px] bg-slate-900/60 px-2 py-1.5 rounded border border-slate-800/60"
+                    >
+                      <div class="col-span-3 font-semibold text-slate-200 truncate" :title="ti.name">{{ ti.name }}</div>
+                      <div class="col-span-3 font-mono text-slate-300 truncate" :title="ti.value">{{ ti.value || '--' }}</div>
+                      <div class="col-span-2">
+                        <span
+                          class="rpt-badge font-mono text-[10px] border"
+                          :class="getSignalBadgeClass(ti.signal)"
+                        >{{ ti.signal }}</span>
+                      </div>
+                      <div class="col-span-4 text-slate-400 text-[10.5px]" :title="ti.comment">
+                        {{ ti.comment || '—' }}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- 📰 消息面利好点 -->
+                <div v-if="item.news_highlights?.length">
+                  <div class="text-[11px] font-bold text-amber-300 mb-1.5 flex items-center gap-1 mt-1">
+                    📰 消息面利好点
+                    <span class="text-slate-500 font-normal text-[10px]">（{{ item.news_highlights.length }} 条精选）</span>
+                  </div>
+                  <div class="space-y-1.5">
+                    <div
+                      v-for="(nh, nhi) in item.news_highlights"
+                      :key="nhi"
+                      class="bg-slate-900/60 px-2.5 py-1.5 rounded border border-slate-800/60"
+                    >
+                      <div class="flex items-start gap-2">
+                        <div class="flex-1">
+                          <div class="text-slate-200 text-[11px] font-medium leading-snug">
+                            {{ nh.title }}
+                          </div>
+                          <div v-if="nh.why_relevant" class="text-emerald-300/90 text-[10.5px] mt-0.5 leading-relaxed">
+                            💡 {{ nh.why_relevant }}
+                          </div>
+                        </div>
+                        <div class="flex flex-col items-end gap-0.5 text-[10px] font-mono text-slate-500 shrink-0">
+                          <span v-if="nh.time">{{ nh.time }}</span>
+                          <span v-if="nh.source" class="text-slate-600">{{ nh.source }}</span>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
