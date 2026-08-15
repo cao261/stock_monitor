@@ -8,6 +8,7 @@ v4.0 升级：从「严厉监工」→「前瞻性交易领航员」
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -498,68 +499,82 @@ DISCOVER_SYSTEM_PROMPT = (
     "3. 请用【严格合法 JSON】格式输出，不要任何 markdown 包裹、不要解释性文字。"
 )
 
-DISCOVER_USER_PROMPT = """请基于以下多维市场数据，挖掘 3 个最值得【低位埋伏 / 拐点低吸】的前瞻爆发方向。
+# ====================== 3.5 v4.1+ AI 前瞻 Alpha 掘金（低位埋伏与事件驱动） ======================
+DISCOVER_SYSTEM_PROMPT = """你是一名顶尖宏观策略首席分析师与头部游资决策导师，专注于【前瞻低位埋伏、事件驱动催化与拐点左侧博弈】。
 
-【1. 消息面：最近 24 小时核心快讯与政策催化（{n_news} 条）】
+【极其重要的核心原则】
+1. 严禁事后解释：绝不要解释今天或过去几天已经暴涨、涨停的股票！那没有任何实操价值。
+2. 核心任务是【前瞻推演未来 3-10 个交易日具备爆发潜力的低位拐点】：
+   - 催化事件倒计时：明确指出未来几天/下周有何尚未被充分定价的行业重磅会议、政策细则落地、产业技术发布会或周期拐点；
+   - 市场预期差：深度剖析为什么当前市场尚未充分定价（主力在犹豫什么、散户的认知盲区何在、为什么现在是左侧低吸窗口）；
+   - 右侧质变信号：明确指出当出现什么信号（如放量站上压力位/5日均线上穿20日均线）时意味着主升浪启动；
+3. 严谨的技术面支撑压力防守：
+   - 必须基于输入数据中给出的真实支撑位（如 MA20、箱体底部）、压力位（如箱体上轨、前高阻力）与 ATR 波动率来制定低吸区间、止盈与止损；
+   - 股票性质不同（高弹性进攻型 vs 稳健防守型），波动空间不同，绝不可给无意义的假大空建议！
+
+请严格输出 JSON。"""
+
+
+DISCOVER_USER_PROMPT = """请基于以下真实的多维市场数据（政策催化快讯 + 主力资金流 + 低位标的真实支撑压力与波动属性），前瞻推演 3 个最值得【左侧低位埋伏】的方向。
+
+【1. 消息面：最近 24 小时政策动向与行业事件驱动日程（{n_news} 条）】
 {news_block}
 
 【2. 资金流向：主力净流入板块 Top {n_sectors}】
 {sectors_block}
 
-【3. 低位蓄势与温和吸筹标的池（涨跌幅温和，处于低位震荡/蓄势区，适合低吸埋伏）】
+【3. 重点低位蓄势标的池（已计算真实技术支撑位、阻力位、ATR波动率与波动类型）】
 {low_accum_block}
 
-【4. 今日市场主线与领涨先锋（供研判风口扩散与低位补涨关联）】
-{momentum_block}
-
-【任务要求】
-找出 3 个具备前瞻催化、预期差大、适合在低位逢低埋伏的方向：
-- sector: 题材/板块名称
-- ambush_type: 埋伏类型（如 "政策催化左侧潜伏" / "主线分歧低位补涨" / "缩量企稳拐点低吸" / "重磅事件倒计时"）
-- catalyst_window: 预判爆发时间窗口（如 "未来 1-3 个交易日" / "下周重磅大会前夕" / "本月中旬政策预期"）
-- catalyst_logic: 前瞻催化与预期差逻辑（≤150字，说明未来可能发酵的重磅事件/政策与市场预期差）
-- technical_pattern: 低位技术特征与主力蓄势迹象（≤80字，说明底部形态、缩量企稳或温和吸筹特征）
-- stocks: 3-4 只低位埋伏代表标的，每只必须包含：
+【推演任务与输出格式要求】
+请输出 3 个前瞻埋伏方案，每个方案必须包含：
+- sector: 板块/题材方向（如 "商业航天与空天地一体化"）
+- score: 0~100 的前瞻埋伏综合评分（如 88 / 76 / 68，综合催化强度与位置安全边际）
+- ambush_type: 埋伏策略类型（"政策催化左侧潜伏" / "缩量企稳拐点低吸" / "主线分歧低位补涨" / "重磅事件倒计时"）
+- catalyst_window: 预判爆发窗口（如 "未来 1-3 个交易日" / "下周重磅大会前夕" / "本月中旬政策落地窗口"）
+- catalyst_logic: 前瞻催化与预期差逻辑（≤150字，剖析未来即将发生的事件、市场认知盲区与预期差）
+- technical_pattern: 低位技术蓄势形态（≤80字，结合均线粘合、地量见底、箱体蓄势等特征）
+- breakout_trigger: 右侧质变启动信号（≤40字，如 "放量突破箱体上轨或单日成交额放大1.5倍"）
+- stocks: 2-3 只低位代表标的，每只必须包含：
   - code: 带 sh/sz/bj 前缀的代码（如 sh600xxx / sz00xxxx）
   - name: 股票名称
-  - current_price: 现价（数字）
-  - ambush_zone: [min, max] 建议低吸埋伏买点区间（数字数组）
-  - target_win: 目标止盈价（数字）
-  - stop_loss: 防守止损价（数字）
-  - stock_logic: ≤30 字的个股专属埋伏亮点（如 "低位底部震荡企稳，估值处于历史10%分位"）
+  - current_price: 现价
+  - ambush_zone: [min, max] 建议低吸买点区间（紧贴关键支撑位）
+  - target_win: 目标止盈价（指向第一强阻力/压力位）
+  - stop_loss: 防守止损价（有效跌破关键支撑位的硬止损）
+  - volatility_tag: 波动属性标签（如 "高弹性标的" 或 "稳健型"）
+  - stock_logic: ≤40 字的个股专属埋伏理由与支撑依据（如 "依托20日均线支撑低吸，估值处于历史底部"）
 - level: 爆发确定性（"高" / "中"）
-- risk_warning: ≤50 字的风控与撤退纪律（何时应认错撤退）
+- risk_warning: ≤50 字的风控与认错撤退纪律
 
 【输出 schema（严格 JSON）】
 {{
   "discoveries": [
     {{
       "sector": "方向名称",
+      "score": 88,
       "ambush_type": "政策催化左侧潜伏",
       "catalyst_window": "未来 1-3 个交易日",
-      "catalyst_logic": "前瞻催化与预期差分析...",
-      "technical_pattern": "底部均线粘合，缩量震荡蓄势...",
+      "catalyst_logic": "前瞻催化事件分析与市场预期差...",
+      "technical_pattern": "底部均线粘合，成交量极度收敛...",
+      "breakout_trigger": "放量站上XX元压力位",
       "stocks": [
         {{
           "code": "sh600xxx",
           "name": "股票名",
-          "current_price": 12.50,
-          "ambush_zone": [12.20, 12.60],
-          "target_win": 14.50,
-          "stop_loss": 11.80,
-          "stock_logic": "低位年线支撑+缩量回踩企稳"
+          "current_price": 25.50,
+          "ambush_zone": [24.80, 25.60],
+          "target_win": 29.50,
+          "stop_loss": 23.80,
+          "volatility_tag": "高弹性进攻型",
+          "stock_logic": "以MA20均线支撑为防守位低吸，预期差较大"
         }}
       ],
       "level": "高",
-      "risk_warning": "若跌破XX元支撑位或催化落空则止损离场"
+      "risk_warning": "若跌破支撑防守线或政策不及预期坚决止损"
     }}
   ]
 }}
-
-注意：
-1. 标的必须从提供的低位蓄势池或主线关联池中挑选真实的 A 股代码
-2. 严禁推荐已连板大涨追高的股票，必须聚焦于低位买点
-3. ambush_zone 必须包含当前价附近或略下方支撑位，形成合理低吸区间
 
 请直接输出 JSON："""
 
@@ -644,7 +659,7 @@ def build_discover_messages(
 
 
 def _extract_stock_item(s: Any, all_valid_codes: dict[str, str]) -> dict | None:
-    """万能容错提取单只个股信息（支持 dict 或各种形式的 str）。"""
+    """万能容错提取单只个股信息，并调用技术分析引擎计算真实支撑压力与波动属性。"""
     if isinstance(s, dict):
         code_raw = _normalize_code_robust(str(s.get("code", "")))
         name = str(s.get("name", "")).strip()[:20]
@@ -653,15 +668,15 @@ def _extract_stock_item(s: Any, all_valid_codes: dict[str, str]) -> dict | None:
         tw = s.get("target_win")
         tl = s.get("stop_loss") or s.get("target_loss")
         logic = str(s.get("stock_logic", "") or s.get("logic", "")).strip()[:100]
+        v_tag = str(s.get("volatility_tag", "")).strip()
     elif isinstance(s, str):
         s_str = s.strip()
-        # 尝试从中提取 6 位数字代码
         m = re.search(r"(\b(?:sh|sz|bj)?\d{6}\b)", s_str, re.IGNORECASE)
         if not m:
             return None
         code_raw = _normalize_code_robust(m.group(1))
         name = re.sub(r"[\(\)\[\]\d\.\-sh|sz|bj]", "", s_str).strip()[:20]
-        cur_p, zone, tw, tl = None, None, None, None
+        cur_p, zone, tw, tl, v_tag = None, None, None, None, ""
         logic = "低位蓄势企稳标的"
     else:
         return None
@@ -677,6 +692,11 @@ def _extract_stock_item(s: Any, all_valid_codes: dict[str, str]) -> dict | None:
     except Exception:
         cur_price = None
 
+    # 调用量化技术面引擎精准分析支撑压力与波动率
+    from analyzer import calculate_stock_ambush_levels
+    tech = calculate_stock_ambush_levels(code_raw, cur_price=cur_price)
+
+    # 优先采用有效解析区间，缺失时采用技术面计算值
     zone_out = None
     if isinstance(zone, list) and len(zone) >= 2:
         try:
@@ -684,31 +704,37 @@ def _extract_stock_item(s: Any, all_valid_codes: dict[str, str]) -> dict | None:
             zone_out = [round(min(z0, z1), 2), round(max(z0, z1), 2)]
         except Exception:
             pass
-    elif cur_price and cur_price > 0:
-        zone_out = [round(cur_price * 0.98, 2), round(cur_price * 1.01, 2)]
+    if not zone_out:
+        zone_out = tech["ambush_zone"]
 
     target_win = None
     if tw is not None:
         try: target_win = round(float(tw), 2)
         except Exception: pass
-    elif cur_price and cur_price > 0:
-        target_win = round(cur_price * 1.15, 2)
+    if not target_win:
+        target_win = tech["target_win"]
 
     stop_loss = None
     if tl is not None:
         try: stop_loss = round(float(tl), 2)
         except Exception: pass
-    elif cur_price and cur_price > 0:
-        stop_loss = round(cur_price * 0.94, 2)
+    if not stop_loss:
+        stop_loss = tech["stop_loss"]
 
     return {
         "code": code_raw,
         "name": name or code_raw,
-        "current_price": cur_price,
+        "current_price": cur_price or tech.get("latest_close") or tech.get("support_price"),
+        "support_price": tech["support_price"],
+        "support_name": tech["support_name"],
+        "resistance_price": tech["resistance_price"],
+        "resistance_name": tech["resistance_name"],
+        "volatility_tag": v_tag or tech["volatility_tag"],
+        "technical_basis": tech["technical_basis"],
         "ambush_zone": zone_out,
         "target_win": target_win,
         "stop_loss": stop_loss,
-        "stock_logic": logic or "低位蓄势，具备爆发弹性",
+        "stock_logic": logic or tech["technical_basis"],
     }
 
 
@@ -718,10 +744,10 @@ def _generate_fallback_discoveries(
     news: list[dict],
     all_valid_codes: dict[str, str],
 ) -> list[dict]:
-    """保底引擎：当大模型因限流/网络异常或返回空时，基于真实低位蓄势池与资金流生成量化埋伏方案。"""
+    """保底引擎：当大模型因限流/网络异常或返回空时，基于真实主力资金流与均线支撑生成量化埋伏方案。"""
     out: list[dict] = []
     
-    # 方向 1：资金流入与政策共振（高分 88分）
+    # 方向 1：主力资金流入与政策共振（88分）
     sec1 = sectors[0]["name"] if sectors else "前沿高端制造与商业航天"
     stks1 = []
     for s in low_accum[:3]:
@@ -734,14 +760,15 @@ def _generate_fallback_discoveries(
             "score": 88,
             "ambush_type": "政策催化左侧潜伏",
             "catalyst_window": "未来 1-3 个交易日",
-            "catalyst_logic": "核心政策与产业政策密集出台，主力资金呈温和净流入态势，市场对后续落地存在预期差。",
-            "technical_pattern": "板块指数触及 60 日均线支撑，成交量温和收敛，个股在箱体底部企稳。",
+            "catalyst_logic": "核心产业政策预期发酵，主力资金呈持续净流入态势。市场此前因担忧落地节奏存在预期差，当前具备左侧潜伏价值。",
+            "technical_pattern": "板块回踩 20 日均线支撑企稳，成交量温和收敛，个股在箱体底部形成多头排列。",
+            "breakout_trigger": "放量突破近期箱体上轨压力位并伴随成交量放大 1.3 倍以上",
             "stocks": stks1,
             "level": "高",
-            "risk_warning": "若跌破建议止损价或大盘放量下行，应坚决执行防守纪律。",
+            "risk_warning": "若跌破各标的关键均线支撑位应严格执行纪律止损。",
         })
 
-    # 方向 2：缩量回踩企稳拐点（中分 76分）
+    # 方向 2：缩量回踩企稳拐点（76分）
     sec2 = sectors[1]["name"] if len(sectors) > 1 else "半导体与集成电路"
     stks2 = []
     for s in low_accum[3:6]:
@@ -754,15 +781,16 @@ def _generate_fallback_discoveries(
             "score": 76,
             "ambush_type": "缩量企稳拐点低吸",
             "catalyst_window": "未来 3-5 个交易日",
-            "catalyst_logic": "前期热点调整充分，近期抛压衰竭，行业龙头业绩与需求具备复苏反弹动能。",
-            "technical_pattern": "日线级别均线粘合向上发散，5 日量比小于 0.8 呈现典型地量见底特征。",
+            "catalyst_logic": "前期调整充分，近期抛压衰竭，行业基本面景气度具备向上复苏反弹动能。",
+            "technical_pattern": "日线级别均线粘合向上发散，5 日量比小于 0.8 呈现典型地量见底蓄势特征。",
+            "breakout_trigger": "5 日均线上穿 20 日均线形成金叉且单日涨幅超过 2.5%",
             "stocks": stks2,
             "level": "中",
-            "risk_warning": "若成交量持续低迷无法突破上方阻力，可逢反弹减仓。",
+            "risk_warning": "若成交量持续萎缩无法突破上方第一强阻力，可逢反弹分批减仓。",
         })
 
-    # 方向 3：主线分歧低位补涨（基础分 65分）
-    sec3 = sectors[2]["name"] if len(sectors) > 2 else "人形机器人与高端数控"
+    # 方向 3：主线分歧低位补涨（65分）
+    sec3 = sectors[2]["name"] if len(sectors) > 2 else "人形机器人与高端母机"
     stks3 = []
     for s in low_accum[6:9]:
         item = _extract_stock_item(s, all_valid_codes)
@@ -774,11 +802,12 @@ def _generate_fallback_discoveries(
             "score": 65,
             "ambush_type": "主线分歧低位补涨",
             "catalyst_window": "本周中后期",
-            "catalyst_logic": "高位龙头分歧释放后，资金转向同题材估值处于历史低位的低位配套链标的。",
+            "catalyst_logic": "高位龙头分歧调整后，活跃资金分流至同题材估值处于历史低位的配套产业链标的。",
             "technical_pattern": "低位双底筑底形态初显，MACD 底部金叉，具备补涨弹性空间。",
+            "breakout_trigger": "板块内出现首板涨停标的带动低位补涨梯队放量启动",
             "stocks": stks3,
             "level": "中",
-            "risk_warning": "补涨行情节奏较快，达到目标止盈位应分批止盈。",
+            "risk_warning": "补涨行情轮动速度较快，达到建议目标止盈位应果断止盈。",
         })
 
     return out
@@ -791,7 +820,7 @@ def _sanitize_discoveries(
     sectors: list[dict] | None = None,
     news: list[dict] | None = None,
 ) -> dict:
-    """万能清洗 LLM 返回的前瞻埋伏 discover JSON，支持评分系统与保底。"""
+    """万能清洗 LLM 返回的前瞻埋伏 discover JSON，支持评分系统、真实支撑压力计算与引擎来源标注。"""
     raw_list: list = []
     if isinstance(raw, list):
         raw_list = raw
@@ -817,6 +846,7 @@ def _sanitize_discoveries(
         catalyst_window = str(d.get("catalyst_window", "")).strip()[:30] or "未来 1-3 个交易日"
         catalyst_logic = str(d.get("catalyst_logic", "") or d.get("logic", "")).strip()[:500] or "前瞻催化与政策预期差推演"
         technical_pattern = str(d.get("technical_pattern", "")).strip()[:300] or "低位均线蓄势企稳"
+        breakout_trigger = str(d.get("breakout_trigger", "")).strip()[:100] or "放量突破短期关键阻力线"
         risk_warning = str(d.get("risk_warning", "")).strip()[:200] or "跌破支撑防守位应严格执行止损"
         
         level = str(d.get("level", "")).strip()
@@ -830,7 +860,7 @@ def _sanitize_discoveries(
         except Exception:
             score = 88 if level == "高" else 75
 
-        # 清洗 stocks
+        # 清洗 stocks 并调用技术分析引擎计算真实支撑压力
         raw_stocks = d.get("stocks", []) or d.get("stock_list", []) or []
         if not isinstance(raw_stocks, list):
             raw_stocks = []
@@ -853,17 +883,26 @@ def _sanitize_discoveries(
             "catalyst_window": catalyst_window,
             "catalyst_logic": catalyst_logic,
             "technical_pattern": technical_pattern,
+            "breakout_trigger": breakout_trigger,
             "stocks": stocks,
             "level": level,
             "risk_warning": risk_warning,
         })
 
-    # 如果清洗后依然为空，触发保底引擎，确保永远有结果展示
+    is_fallback = False
     if not out and low_accum:
+        is_fallback = True
         out = _generate_fallback_discoveries(low_accum, sectors or [], news or [], all_valid_codes)
 
     return {
         "discoveries": out[:3],
+        "engine_type": "fallback" if is_fallback else "ai",
+        "engine_name": "⚡ 量化规则低位筛选 (兜底引擎)" if is_fallback else f"🤖 AI 深度前瞻研报 ({config.LLM_MODEL_NAME})",
+        "engine_desc": (
+            "大模型限流或响应异常时，已无缝切换至本地量化规则引擎。基于主力资金净流入、MA20均线支撑与ATR波动率生成。"
+            if is_fallback else
+            "由大模型深度推演：挖掘 7x24 政策预期差、事件驱动倒计时、右侧启动信号与均线防守空间。"
+        ),
         "model": config.LLM_MODEL_NAME,
     }
 

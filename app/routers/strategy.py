@@ -351,6 +351,7 @@ async def discover() -> dict:
     }
 
     # ===== 1. 低位蓄势池：涨跌温和 (-2.0% ~ +3.8%)、成交活跃、适合埋伏 =====
+    from analyzer import calculate_stock_ambush_levels
     low_accum_raw = [
         {
             "code": c,
@@ -364,12 +365,30 @@ async def discover() -> dict:
         and -2.0 <= d["change_pct"] <= 3.8
     ]
     if not low_accum_raw:
-        # 兜底：从代码清单中取前 40 只活跃蓝筹/成长标的
         low_accum_raw = [
             {"code": c, "name": d.get("name", ""), "change_pct": 0.5, "price": 12.0, "volume": 80000}
             for c, d in list(all_stocks.items())[:40]
         ]
-    low_accum = sorted(low_accum_raw, key=lambda x: x["volume"], reverse=True)[:40]
+    sorted_candidates = sorted(low_accum_raw, key=lambda x: x["volume"], reverse=True)[:35]
+    
+    # 注入精准技术面指标（支撑位、阻力位、ATR波动率）
+    low_accum = []
+    for cand in sorted_candidates:
+        c_code = cand["code"]
+        c_price = cand["price"]
+        tech = calculate_stock_ambush_levels(c_code, cur_price=c_price)
+        low_accum.append({
+            **cand,
+            "support_price": tech["support_price"],
+            "support_name": tech["support_name"],
+            "resistance_price": tech["resistance_price"],
+            "resistance_name": tech["resistance_name"],
+            "volatility_tag": tech["volatility_tag"],
+            "technical_basis": tech["technical_basis"],
+            "ambush_zone": tech["ambush_zone"],
+            "target_win": tech["target_win"],
+            "stop_loss": tech["stop_loss"],
+        })
 
     # ===== 2. 今日主线与领涨先锋（供研判热点扩散与低位补涨关联）=====
     by_chg = sorted(
@@ -445,7 +464,10 @@ async def discover() -> dict:
 
     return {
         "discoveries": result["discoveries"],
-        "model": result["model"],
+        "engine_type": result.get("engine_type", "ai"),
+        "engine_name": result.get("engine_name", "🤖 AI 深度前瞻研报"),
+        "engine_desc": result.get("engine_desc", "大模型前瞻推演"),
+        "model": result.get("model", config.LLM_MODEL_NAME),
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "meta": {
             "low_accum_count": len(low_accum),

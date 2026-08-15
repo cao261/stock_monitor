@@ -498,3 +498,80 @@ def build_ai_plan_payload(
             continue
     return features, ohlcv_10d
 
+
+def calculate_stock_ambush_levels(
+    code: str,
+    cur_price: float | None = None,
+    history_records: list[dict] | None = None,
+) -> dict[str, Any]:
+    """为低位埋伏精准计算真实支撑位、压力位、ATR波动率、建议低吸甜区、目标止盈与防守止损。
+
+    依据真实技术面：
+    - 支撑位：优先取 MA20 或 20日箱体下轨最低点
+    - 压力位：取 20日箱体上轨高点或基于 ATR 动态扩展
+    - 波动率：基于 20日收益率标准差与 ATR 划分进攻/稳健/防守型
+    - 低吸甜区：围绕支撑位与短期均线粘合带构建
+    """
+    features = extract_kline_features(history_records)
+    price = cur_price or features.get("latest_close") or 10.0
+
+    ma20 = features.get("ma20")
+    support_20d = features.get("support_level")
+    resistance_20d = features.get("resistance_level")
+    atr = features.get("atr14") or round(price * 0.035, 2)
+    vol_pct = features.get("volatility_20d_pct") or 3.0
+
+    # 1. 真实支撑位确定
+    if ma20 and ma20 > 0 and price >= ma20 * 0.96:
+        support_price = round(ma20, 2)
+        support_name = f"20日均线支撑 (¥{support_price})"
+    elif support_20d and support_20d > 0:
+        support_price = round(support_20d, 2)
+        support_name = f"近期箱体底部支撑 (¥{support_price})"
+    else:
+        support_price = round(max(0.01, price - 1.5 * atr), 2)
+        support_name = f"ATR动态防守支撑 (¥{support_price})"
+
+    # 2. 真实压力位确定
+    if resistance_20d and resistance_20d > price * 1.01:
+        resistance_price = round(resistance_20d, 2)
+        resistance_name = f"近期箱体上轨/前高压力 (¥{resistance_price})"
+    else:
+        resistance_price = round(price + 2.5 * atr, 2)
+        resistance_name = f"ATR趋势上攻目标压力 (¥{resistance_price})"
+
+    # 3. 波动属性分类
+    if vol_pct >= 4.5:
+        vol_tag = f"⚡ 高弹性进攻型 (日均波动 {vol_pct:.1f}%, ATR ¥{atr:.2f})"
+    elif vol_pct >= 2.5:
+        vol_tag = f"📈 稳健成长型 (日均波动 {vol_pct:.1f}%, ATR ¥{atr:.2f})"
+    else:
+        vol_tag = f"🛡️ 低波防守型 (日均波动 {vol_pct:.1f}%, ATR ¥{atr:.2f})"
+
+    # 4. 建议低吸买点甜区：围绕支撑位构建
+    zone_min = round(max(0.01, support_price * 0.99), 2)
+    zone_max = round(min(price * 1.01, max(zone_min + 0.01, (support_price + price) / 2)), 2)
+    ambush_zone = [min(zone_min, zone_max), max(zone_min, zone_max)]
+
+    # 5. 建议止盈与止损
+    target_win = round(max(price * 1.05, resistance_price), 2)
+    stop_loss = round(max(0.01, support_price * 0.965), 2)
+
+    # 6. 技术面逻辑描述
+    basis = f"{vol_tag}。关键防守位在 {support_name}，上方第一目标压力为 {resistance_name}。在接近支撑位 [¥{ambush_zone[0]} ~ ¥{ambush_zone[1]}] 区间低吸盈亏比最佳。"
+
+    return {
+        "support_price": support_price,
+        "support_name": support_name,
+        "resistance_price": resistance_price,
+        "resistance_name": resistance_name,
+        "volatility_pct": round(vol_pct, 2),
+        "volatility_tag": vol_tag,
+        "atr": round(atr, 2),
+        "ambush_zone": ambush_zone,
+        "target_win": target_win,
+        "stop_loss": stop_loss,
+        "technical_basis": basis,
+    }
+
+

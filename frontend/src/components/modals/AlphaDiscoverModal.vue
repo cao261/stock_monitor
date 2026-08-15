@@ -3,7 +3,7 @@ const props = defineProps({
   show: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
   loadingStep: { type: Number, default: 0 },
-  result: { type: Object, default: null }, // { discoveries, model, generated_at, meta }
+  result: { type: Object, default: null }, // { discoveries, engine_type, engine_name, engine_desc, model, generated_at, meta }
   error: { type: String, default: '' },
 })
 
@@ -12,7 +12,7 @@ const emit = defineEmits(['close', 'refresh', 'open-chart', 'add-to-watchlist'])
 const LOADING_STEPS = [
   '正在扫描 7x24 政策催化与重磅行业事件驱动日程…',
   '正在全市场 5,000+ 标的中筛选底部蓄势与缩量企稳标的…',
-  '正在推演具备爆发预期差的低位买点甜区与综合评分…',
+  '正在推演具备爆发预期差的低位买点甜区、支撑压力与综合评分…',
 ]
 
 function fmtPrice(v) {
@@ -75,15 +75,25 @@ function getScoreBadgeClass(score) {
 
         <!-- 结果展示 -->
         <template v-else-if="props.result?.discoveries?.length">
-          <!-- 元信息条 -->
-          <div v-if="props.result.meta" class="p-2 bg-slate-900/80 rounded border border-slate-800 font-mono text-[11px] text-slate-400 flex items-center justify-between flex-wrap gap-2">
-            <span>
-              💡 挖掘底账：融合 {{ props.result.meta.news_count }} 条核心政策快讯、{{ props.result.meta.sectors_count }} 个主力资金流入板块、{{ props.result.meta.low_accum_count }} 只低位温和蓄势标的与热点扩散逻辑
-            </span>
-            <span>{{ props.result.generated_at }}</span>
+          <!-- 引擎来源与可信度说明条 -->
+          <div 
+            class="p-2.5 rounded border flex items-center justify-between flex-wrap gap-2 text-[11px]"
+            :class="props.result.engine_type === 'fallback' 
+              ? 'bg-amber-950/30 border-amber-800/60 text-amber-200' 
+              : 'bg-purple-950/30 border-purple-800/60 text-purple-200'"
+          >
+            <div class="flex items-center gap-2">
+              <span class="font-bold font-mono px-2 py-0.5 rounded"
+                :class="props.result.engine_type === 'fallback' ? 'bg-amber-900 text-amber-100' : 'bg-purple-900 text-purple-100'"
+              >
+                {{ props.result.engine_name || (props.result.engine_type === 'fallback' ? '⚡ 量化规则低位筛选 (兜底引擎)' : '🤖 AI 深度前瞻研报') }}
+              </span>
+              <span>{{ props.result.engine_desc }}</span>
+            </div>
+            <span class="font-mono text-slate-400 text-[10px]">{{ props.result.generated_at }}</span>
           </div>
 
-          <!-- 前瞻埋伏方向卡片列表（包含评分制） -->
+          <!-- 前瞻埋伏方向卡片列表 -->
           <div 
             v-for="(item, idx) in props.result.discoveries" 
             :key="idx"
@@ -132,16 +142,22 @@ function getScoreBadgeClass(score) {
               </p>
             </div>
 
-            <!-- 低位技术特征 -->
-            <div v-if="item.technical_pattern" class="text-slate-400 text-[11px] flex items-start gap-1">
-              <span class="text-slate-300 font-semibold shrink-0">📊 低位蓄势特征:</span>
-              <span>{{ item.technical_pattern }}</span>
+            <!-- 低位技术特征与右侧质变信号 -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px]">
+              <div v-if="item.technical_pattern" class="p-2 bg-slate-900/60 rounded border border-slate-800/80 flex items-start gap-1">
+                <span class="text-slate-300 font-semibold shrink-0">📊 低位蓄势形态:</span>
+                <span class="text-slate-400">{{ item.technical_pattern }}</span>
+              </div>
+              <div v-if="item.breakout_trigger" class="p-2 bg-blue-950/30 rounded border border-blue-900/40 flex items-start gap-1">
+                <span class="text-blue-300 font-semibold shrink-0">🚀 右侧质变信号:</span>
+                <span class="text-blue-200">{{ item.breakout_trigger }}</span>
+              </div>
             </div>
 
-            <!-- 🎯 低位最具爆发弹性埋伏标的矩阵 -->
+            <!-- 🎯 低位最具爆发弹性埋伏标的矩阵（含真实支撑压力分析） -->
             <div class="space-y-1.5 pt-1">
               <div class="text-[11px] font-bold text-emerald-400 flex items-center justify-between">
-                <span>🎯 重点低位埋伏标的与买点甜区：</span>
+                <span>🎯 重点低位埋伏标的与技术支撑压力矩阵：</span>
                 <span class="text-[10px] font-normal text-slate-400">点击标的快速查看 K 线走势</span>
               </div>
 
@@ -149,9 +165,10 @@ function getScoreBadgeClass(score) {
                 <div 
                   v-for="stk in item.stocks" 
                   :key="stk.code"
-                  class="bg-slate-900/90 p-2.5 rounded border border-slate-700/80 hover:border-blue-500/80 transition flex flex-col justify-between space-y-2"
+                  class="bg-slate-900/90 p-3 rounded border border-slate-700/80 hover:border-blue-500/80 transition flex flex-col justify-between space-y-2.5"
                 >
-                  <div>
+                  <div class="space-y-1.5">
+                    <!-- 代码名称与价格 -->
                     <div class="flex items-center justify-between">
                       <button 
                         @click="emit('open-chart', { ts_code: stk.code, name: stk.name })"
@@ -159,31 +176,48 @@ function getScoreBadgeClass(score) {
                       >
                         {{ stk.name }} ({{ stk.code }}) 📈
                       </button>
-                      <span v-if="stk.current_price" class="font-mono font-bold text-slate-200 text-xs">
+                      <span v-if="stk.current_price" class="font-mono font-bold text-slate-100 text-xs">
                         ¥{{ fmtPrice(stk.current_price) }}
                       </span>
                     </div>
 
-                    <!-- 埋伏买点区间 -->
-                    <div v-if="stk.ambush_zone" class="mt-1 flex items-center gap-1 text-[11px] font-mono text-amber-300">
+                    <!-- 波动属性标签 -->
+                    <div v-if="stk.volatility_tag" class="text-[10px] text-purple-300 font-mono">
+                      {{ stk.volatility_tag }}
+                    </div>
+
+                    <!-- 真实支撑位与压力位 -->
+                    <div class="p-1.5 bg-slate-950/60 rounded border border-slate-800 text-[11px] font-mono space-y-0.5">
+                      <div class="flex items-center justify-between text-emerald-400">
+                        <span class="text-slate-400">🛡️ 关键支撑:</span>
+                        <span>¥{{ fmtPrice(stk.support_price) }}</span>
+                      </div>
+                      <div class="flex items-center justify-between text-red-400">
+                        <span class="text-slate-400">🏔️ 第一压力:</span>
+                        <span>¥{{ fmtPrice(stk.resistance_price) }}</span>
+                      </div>
+                    </div>
+
+                    <!-- 建议买点区间 -->
+                    <div v-if="stk.ambush_zone" class="flex items-center justify-between text-[11px] font-mono text-amber-300">
                       <span class="text-slate-400">建议低吸甜区:</span>
                       <span class="font-semibold">[¥{{ fmtPrice(stk.ambush_zone[0]) }} ~ ¥{{ fmtPrice(stk.ambush_zone[1]) }}]</span>
                     </div>
 
                     <!-- 目标位与止损位 -->
-                    <div v-if="stk.target_win || stk.stop_loss" class="flex items-center gap-2 text-[11px] font-mono mt-0.5">
-                      <span v-if="stk.target_win" class="text-up">止盈: ¥{{ fmtPrice(stk.target_win) }}</span>
-                      <span v-if="stk.stop_loss" class="text-down">止损: ¥{{ fmtPrice(stk.stop_loss) }}</span>
+                    <div class="flex items-center justify-between text-[11px] font-mono">
+                      <span v-if="stk.target_win" class="text-up font-semibold">止盈: ¥{{ fmtPrice(stk.target_win) }}</span>
+                      <span v-if="stk.stop_loss" class="text-down font-semibold">止损: ¥{{ fmtPrice(stk.stop_loss) }}</span>
                     </div>
 
-                    <!-- 个股专属埋伏逻辑 -->
+                    <!-- 技术面专属逻辑 -->
                     <p class="text-[11px] text-slate-400 line-clamp-2 mt-1">
-                      {{ stk.stock_logic }}
+                      {{ stk.stock_logic || stk.technical_basis }}
                     </p>
                   </div>
 
                   <!-- 快捷加自选按钮 -->
-                  <div class="pt-1.5 border-t border-slate-800 flex items-center justify-between">
+                  <div class="pt-2 border-t border-slate-800 flex items-center justify-between">
                     <button 
                       @click="emit('open-chart', { ts_code: stk.code, name: stk.name })"
                       class="text-[10px] text-blue-400 hover:text-blue-200"

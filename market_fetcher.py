@@ -150,11 +150,19 @@ def _fetch_from_sina_codes() -> list[dict[str, str]]:
 
 
 def fetch_all_codes_sync() -> list[dict[str, str]]:
-    """从 akshare 拉全 A 股代码清单。返回 ``[{"code": "sh600000", "name": "..."}, ...]``。
+    """从 akshare / 新浪 / 磁盘拉全 A 股代码清单。返回 ``[{"code": "sh600000", "name": "..."}, ...]``。
     
-    若网络/SSL异常，自动降级从新浪或本地 data/codes_cache.json 读取。
-    成功获取后自动更新本地磁盘缓存。
+    优化：若本地 data/codes_cache.json 存在且包含完整清单，优先毫秒级直接读取。
     """
+    # 0. 优先尝试本地有效磁盘缓存（毫秒级加载）
+    if CODES_CACHE_FILE.exists():
+        try:
+            cached_data = json.loads(CODES_CACHE_FILE.read_text(encoding="utf-8"))
+            if isinstance(cached_data, list) and len(cached_data) >= 3000:
+                return cached_data
+        except Exception as e:
+            logger.warning("read CODES_CACHE_FILE failed: %r", e)
+
     out: list[dict[str, str]] = []
     # 1. 尝试 akshare
     try:
@@ -186,23 +194,12 @@ def fetch_all_codes_sync() -> list[dict[str, str]]:
             uniq.append(item)
 
     if len(uniq) >= 3000:
-        # 成功拉取到，存盘备用
         try:
             CODES_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
             CODES_CACHE_FILE.write_text(json.dumps(uniq, ensure_ascii=False), encoding="utf-8")
         except Exception as e:
             logger.warning("save CODES_CACHE_FILE failed: %r", e)
         return uniq
-
-    # 3. 如果为空且存在磁盘缓存，从磁盘读取
-    if CODES_CACHE_FILE.exists():
-        try:
-            cached_data = json.loads(CODES_CACHE_FILE.read_text(encoding="utf-8"))
-            if isinstance(cached_data, list) and cached_data:
-                logger.info("loaded %d stock codes from local cache fallback", len(cached_data))
-                return cached_data
-        except Exception as e:
-            logger.warning("read CODES_CACHE_FILE failed: %r", e)
 
     return uniq
 
