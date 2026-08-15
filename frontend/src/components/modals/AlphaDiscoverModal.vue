@@ -12,12 +12,19 @@ const emit = defineEmits(['close', 'refresh', 'open-chart', 'add-to-watchlist'])
 const LOADING_STEPS = [
   '正在扫描 7x24 政策催化与重磅行业事件驱动日程…',
   '正在全市场 5,000+ 标的中筛选底部蓄势与缩量企稳标的…',
-  '正在推演具备爆发预期差的低位买点甜区与盈亏比…',
+  '正在推演具备爆发预期差的低位买点甜区与综合评分…',
 ]
 
 function fmtPrice(v) {
   if (v == null || isNaN(v)) return '--'
   return Number(v).toFixed(2)
+}
+
+function getScoreBadgeClass(score) {
+  const s = Number(score || 75)
+  if (s >= 85) return 'bg-red-950 text-red-200 border-red-600 font-bold'
+  if (s >= 75) return 'bg-amber-950 text-amber-200 border-amber-600 font-bold'
+  return 'bg-slate-800 text-slate-300 border-slate-600 font-medium'
 }
 </script>
 
@@ -76,20 +83,29 @@ function fmtPrice(v) {
             <span>{{ props.result.generated_at }}</span>
           </div>
 
-          <!-- 3 个前瞻埋伏方向卡片 -->
+          <!-- 前瞻埋伏方向卡片列表（包含评分制） -->
           <div 
             v-for="(item, idx) in props.result.discoveries" 
             :key="idx"
             class="rpt-panel-sub p-4 space-y-3 border-l-4"
-            :class="item.level === '高' ? 'border-l-purple-500 bg-purple-950/15' : 'border-l-blue-500 bg-blue-950/15'"
+            :class="(item.score >= 85 || item.level === '高') ? 'border-l-red-500 bg-purple-950/15' : 'border-l-blue-500 bg-blue-950/15'"
           >
             <!-- 题材头部与状态标签 -->
-            <div class="flex items-center justify-between flex-wrap gap-2 pb-1 border-b border-slate-800">
+            <div class="flex items-center justify-between flex-wrap gap-2 pb-1.5 border-b border-slate-800">
               <div class="flex items-center gap-2 flex-wrap">
                 <span class="text-sm font-bold text-slate-100 flex items-center gap-1.5">
                   <span class="text-purple-400 font-mono">#{{ idx + 1 }}</span>
                   {{ item.sector }}
                 </span>
+                
+                <!-- 埋伏综合评分 -->
+                <span 
+                  class="rpt-badge font-mono border"
+                  :class="getScoreBadgeClass(item.score)"
+                >
+                  🎯 埋伏评分：{{ item.score || 75 }}分
+                </span>
+
                 <span class="rpt-badge bg-purple-900/80 text-purple-200 border border-purple-600 font-semibold">
                   🏷️ {{ item.ambush_type || '政策催化左侧潜伏' }}
                 </span>
@@ -102,7 +118,7 @@ function fmtPrice(v) {
                 class="rpt-badge font-mono font-semibold"
                 :class="item.level === '高' ? 'bg-purple-950 text-purple-300 border border-purple-600' : 'bg-slate-800 text-slate-300 border border-slate-700'"
               >
-                爆发确定性：{{ item.level }}
+                确定性：{{ item.level }}
               </span>
             </div>
 
