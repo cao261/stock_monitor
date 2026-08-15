@@ -229,7 +229,55 @@ def _get_client() -> openai.AsyncOpenAI:
     )
 
 
-# ====================== 5. 异步调用：复盘战报 ======================
+# ====================== 5. 异步调用与 20 RPM 速率退避重试 ======================
+async def _call_llm_with_retry(
+    client: openai.AsyncOpenAI,
+    model: str,
+    messages: list[dict],
+    temperature: float = 0.6,
+    max_tokens: int = 2000,
+    response_format: dict | None = None,
+    max_retries: int = 3,
+):
+    """自动处理 20 RPM 等速率限制（HTTP 429 RateLimitError）及超时异常，带指数退避。"""
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except openai.RateLimitError as e:
+            if attempt == max_retries:
+                logger.error("LLM rate limit reached 20 RPM max retries: %r", e)
+                raise
+            sleep_sec = 2.5 * attempt
+            logger.warning(
+                "LLM rate limited (429 / 20 RPM limit), attempt %d/%d, backoff sleeping %.1fs...",
+                attempt, max_retries, sleep_sec
+            )
+            await asyncio.sleep(sleep_sec)
+        except openai.BadRequestError as e:
+            # 部分模型代理不支持 response_format="json_object"，降级重试
+            if response_format and "response_format" in kwargs:
+                logger.warning("LLM response_format 不支持，自动降级为普通补全: %r", e)
+                del kwargs["response_format"]
+                continue
+            raise
+        except (openai.APITimeoutError, openai.APIConnectionError) as e:
+            if attempt == max_retries:
+                logger.error("LLM connection timeout max retries: %r", e)
+                raise
+            sleep_sec = 1.5 * attempt
+            logger.warning("LLM connection/timeout error: %r, retrying in %.1fs...", e, sleep_sec)
+            await asyncio.sleep(sleep_sec)
+
+
 def _first_choice_text(resp) -> str:
     """取 LLM 响应首个 choice 的文本；choices 为空时抛清晰异常（防御 IndexError）。"""
     if not resp.choices:
@@ -238,23 +286,18 @@ def _first_choice_text(resp) -> str:
 
 
 async def generate_report(summary: dict) -> str:
-    """调用 LLM 生成深度复盘报告（Markdown 字符串）。
-
-    错误处理：
-    - LLM 未配置（key 为空）→ 抛出 RuntimeError，调用方应当捕获并降级
-    - 网络 / 限流 / 余额不足 → 抛出原 openai 异常
-    """
+    """调用 LLM 生成深度复盘报告（Markdown 字符串）。"""
     client = _get_client()
     messages = build_messages(summary)
     logger.info(
         "calling LLM (report): model=%s base_url=%s messages=%d",
         config.LLM_MODEL_NAME, config.LLM_BASE_URL, len(messages),
     )
-    resp = await client.chat.completions.create(
+    resp = await _call_llm_with_retry(
+        client=client,
         model=config.LLM_MODEL_NAME,
         messages=messages,
         temperature=0.7,
-        # v4.0: max_tokens 维持 1500（500-700 字 + Markdown 余量）
         max_tokens=1500,
     )
     return _first_choice_text(resp)
@@ -421,26 +464,14 @@ async def generate_ai_plan(
         config.LLM_MODEL_NAME, ts_code, bool(holding_info and holding_info.get('has_position')), len(features), len(ohlcv_10d),
     )
 
-    # 尝试用 response_format 强制 JSON（OpenAI 官方 / 部分兼容服务支持）
-    # 不支持时 catch 后降级为普通 chat completion
-    try:
-        resp = await client.chat.completions.create(
-            model=config.LLM_MODEL_NAME,
-            messages=messages,
-            temperature=0.5,  # 比复盘稍低（决策要稳）
-            max_tokens=800,
-            response_format={"type": "json_object"},
-        )
-    except Exception as e:
-        logger.warning(
-            "ai-plan response_format=json_object 失败，降级为普通调用: %r", e
-        )
-        resp = await client.chat.completions.create(
-            model=config.LLM_MODEL_NAME,
-            messages=messages,
-            temperature=0.5,
-            max_tokens=800,
-        )
+    resp = await _call_llm_with_retry(
+        client=client,
+        model=config.LLM_MODEL_NAME,
+        messages=messages,
+        temperature=0.5,
+        max_tokens=800,
+        response_format={"type": "json_object"},
+    )
 
     content = _first_choice_text(resp)
     logger.info("ai-plan raw content: %s", content[:200])
@@ -533,20 +564,28 @@ DISCOVER_USER_PROMPT = """请基于以下多维市场数据，挖掘 3 个最值
 请直接输出 JSON："""
 
 
-def _normalize_6digit(code: str) -> str:
-    """6 位纯数字 → 带 sh/sz/bj 前缀的 A 股代码。"""
-    if not re.match(r"^\d{6}$", code):
-        return code
-    try:
-        from market_fetcher import _normalize_code as _nf
-        return _nf(code)
-    except Exception:
-        first = code[0]
+def _normalize_code_robust(code: str) -> str:
+    """鲁棒归一化 A 股代码：支持 600519、600519.SH、SH600519、sz000001 等各种格式。"""
+    c = str(code).strip().lower()
+    if "." in c:
+        parts = c.split(".")
+        if len(parts[0]) == 6 and parts[0].isdigit():
+            p1 = parts[1] if parts[1] in ("sh", "sz", "bj") else ""
+            c = p1 + parts[0]
+        elif len(parts[1]) == 6 and parts[1].isdigit():
+            p0 = parts[0] if parts[0] in ("sh", "sz", "bj") else ""
+            c = p0 + parts[1]
+    c = re.sub(r"[^a-z0-9]", "", c)
+    if re.match(r"^(sh|sz|bj)\d{6}$", c):
+        return c
+    if re.match(r"^\d{6}$", c):
+        first = c[0]
         if first in ("6", "9", "5"):
-            return "sh" + code
+            return "sh" + c
         if first in ("4", "8"):
-            return "bj" + code
-        return "sz" + code
+            return "bj" + c
+        return "sz" + c
+    return c
 
 
 def build_discover_messages(
@@ -640,10 +679,8 @@ def _sanitize_discoveries(
         for s in raw_stocks[:5]:
             if not isinstance(s, dict):
                 continue
-            code_raw = str(s.get("code", "")).strip().lower()
+            code_raw = _normalize_code_robust(str(s.get("code", "")))
             name = str(s.get("name", "")).strip()[:20]
-            if re.match(r"^\d{6}$", code_raw):
-                code_raw = _normalize_6digit(code_raw)
             if not re.match(r"^(sh|sz|bj)\d{6}$", code_raw):
                 continue
             if code_raw in seen_codes:

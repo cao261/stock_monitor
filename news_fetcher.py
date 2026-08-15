@@ -199,40 +199,32 @@ def _fetch_from_akshare_sync() -> list[dict]:
 
 # ====================== 主流程：三级降级 ======================
 async def _fetch_news() -> tuple[list[dict], str | None, str | None]:
-    """主备三级降级：财联社 → 新浪 → akshare。
+    """主备三级降级：新浪 7x24 → 财联社 → akshare。
     Returns:
         (items, source, error_msg)
     """
-    # 1) 财联社
-    for attempt in range(2):
-        try:
-            items = await _fetch_from_cls()
-            if items:
-                return items, "cls", None
-            logger.warning("cls returned 0 items, falling through to next source")
-            break
-        except Exception as e:
-            logger.warning("cls fetch failed (attempt %d): %r", attempt + 1, e)
-            if attempt == 0:
-                await asyncio.sleep(3)
-    # 2) 新浪
-    for attempt in range(2):
-        try:
-            items = await _fetch_from_sina()
-            if items:
-                return items, "sina", "财联社不可用，已降级到新浪 7x24"
-            logger.warning("sina returned 0 items, falling through to next source")
-            break
-        except Exception as e:
-            logger.warning("sina fetch failed (attempt %d): %r", attempt + 1, e)
-            if attempt == 0:
-                await asyncio.sleep(3)
+    # 1) 新浪 7x24 (毫秒级响应，稳定性极高)
+    try:
+        items = await _fetch_from_sina()
+        if items:
+            return items, "sina", None
+    except Exception as e:
+        logger.warning("sina fetch failed: %r", e)
+
+    # 2) 财联社
+    try:
+        items = await _fetch_from_cls()
+        if items:
+            return items, "cls", None
+    except Exception as e:
+        logger.warning("cls fetch failed: %r", e)
+
     # 3) akshare 兜底
     try:
         loop = asyncio.get_running_loop()
         items = await loop.run_in_executor(None, _fetch_from_akshare_sync)
         if items:
-            return items, "akshare", "aiohttp 源不可用，已降级到 akshare 财联社"
+            return items, "akshare", "降级到 akshare 财经快讯"
     except Exception as e:
         logger.warning("akshare fallback failed: %r", e)
     return [], None, "所有新闻源都不可用"
