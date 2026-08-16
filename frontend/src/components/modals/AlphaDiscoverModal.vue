@@ -43,6 +43,29 @@ function getScoreBadgeClass(score) {
   return 'bg-slate-800 text-slate-300 border-slate-600 font-medium'
 }
 
+// v4.4: LLM action 决策 (STRONG_BUY/BUY/WATCH/PASS) 颜色与标签
+function getActionBadgeClass(action) {
+  if (action === 'STRONG_BUY') return 'bg-red-950 text-red-200 border-red-500 animate-pulse font-bold'
+  if (action === 'BUY') return 'bg-emerald-950 text-emerald-200 border-emerald-500 font-bold'
+  if (action === 'WATCH') return 'bg-amber-950 text-amber-200 border-amber-500 font-semibold'
+  return 'bg-slate-800 text-slate-400 border-slate-600'
+}
+function getActionIcon(action) {
+  if (action === 'STRONG_BUY') return '🔥'
+  if (action === 'BUY') return '✅'
+  if (action === 'WATCH') return '👁'
+  return '⛔'
+}
+function getActionLabel(action) {
+  if (action === 'STRONG_BUY') return '强烈建仓'
+  if (action === 'BUY') return '建仓 1/3'
+  if (action === 'WATCH') return '观察池'
+  return '放弃'
+}
+function getIntentLabel(intent) {
+  return { accumulation: '吸筹', shakeout: '洗盘', markup: '拉升', distribution: '出货', consolidation: '震荡' }[intent] || intent
+}
+
 function getSignalBadgeClass(signal) {
   if (signal === '利多') return 'bg-emerald-950/70 text-emerald-200 border-emerald-700'
   if (signal === '利空') return 'bg-red-950/70 text-red-200 border-red-700'
@@ -57,7 +80,12 @@ function toggleDetail(idx) {
 }
 
 function hasDetail(item) {
-  return (item.tech_indicators && item.tech_indicators.length) || (item.news_highlights && item.news_highlights.length)
+  if (item.tech_indicators && item.tech_indicators.length) return true
+  if (item.news_highlights && item.news_highlights.length) return true
+  if (item.llm_verification?.t1_message) return true
+  if (item.llm_verification?.t2_technical) return true
+  if (item.llm_verification?.t3_cross) return true
+  return false
 }
 </script>
 
@@ -140,9 +168,9 @@ function hasDetail(item) {
                   <span class="text-purple-400 font-mono">#{{ idx + 1 }}</span>
                   {{ item.sector }}
                 </span>
-                
+
                 <!-- 埋伏综合评分 -->
-                <span 
+                <span
                   class="rpt-badge font-mono border"
                   :class="getScoreBadgeClass(item.score)"
                 >
@@ -157,12 +185,80 @@ function hasDetail(item) {
                 </span>
               </div>
 
-              <span 
-                class="rpt-badge font-mono font-semibold"
-                :class="item.level === '高' ? 'bg-purple-950 text-purple-300 border border-purple-600' : 'bg-slate-800 text-slate-300 border border-slate-700'"
-              >
-                确定性：{{ item.level }}
-              </span>
+              <div class="flex items-center gap-2">
+                <!-- v4.4: LLM 验证后的 action 决策 -->
+                <span
+                  v-if="item.llm_verification?.action"
+                  class="rpt-badge font-mono font-bold border"
+                  :class="getActionBadgeClass(item.llm_verification.action)"
+                  :title="`LLM 综合分 ${item.llm_verification.final_score} | 可信度 ${item.llm_verification.t3_cross?.trustworthiness || '—'}`"
+                >
+                  {{ getActionIcon(item.llm_verification.action) }} {{ getActionLabel(item.llm_verification.action) }}
+                  <span v-if="item.llm_verification.final_score != null" class="text-[10px] ml-1 opacity-80">
+                    {{ item.llm_verification.final_score }}分
+                  </span>
+                </span>
+                <span
+                  class="rpt-badge font-mono font-semibold"
+                  :class="item.level === '高' ? 'bg-purple-950 text-purple-300 border border-purple-600' : 'bg-slate-800 text-slate-300 border border-slate-700'"
+                >
+                  确定性：{{ item.level }}
+                </span>
+              </div>
+            </div>
+
+            <!-- v4.4: 4 维评分 (TRADING_LOGIC 第 2.1 节) + 5 大左侧信号 -->
+            <div v-if="item.score_4d" class="grid grid-cols-1 md:grid-cols-5 gap-2 text-[11px]">
+              <!-- 4 维评分条 -->
+              <div class="md:col-span-3 p-2 rounded bg-slate-950/40 border border-slate-800">
+                <div class="text-[10px] text-slate-400 font-bold mb-1.5 flex items-center justify-between">
+                  <span>📊 4 维量化评分</span>
+                  <span class="font-mono text-slate-300">综合 {{ item.score_4d.total }} · {{ item.score_4d.grade }} 级</span>
+                </div>
+                <div class="space-y-1">
+                  <div v-for="dim in [
+                    {key: 'msg', label: '消息面', color: 'amber'},
+                    {key: 'cap', label: '资金面', color: 'emerald'},
+                    {key: 'tech', label: '技术面', color: 'sky'},
+                    {key: 'sent', label: '情绪面', color: 'purple'},
+                  ]" :key="dim.key" class="flex items-center gap-2">
+                    <span class="w-12 text-slate-400">{{ dim.label }}</span>
+                    <div class="flex-1 h-1.5 bg-slate-800 rounded overflow-hidden">
+                      <div
+                        class="h-full rounded transition-all"
+                        :class="`bg-${dim.color}-500`"
+                        :style="{ width: (item.score_4d[dim.key] || 0) + '%' }"
+                      ></div>
+                    </div>
+                    <span class="w-10 text-right font-mono text-slate-300">{{ item.score_4d[dim.key] }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- 5 大左侧信号 -->
+              <div class="md:col-span-2 p-2 rounded bg-slate-950/40 border border-slate-800">
+                <div class="text-[10px] text-slate-400 font-bold mb-1.5 flex items-center justify-between">
+                  <span>🎯 5 大左侧信号</span>
+                  <span class="font-mono text-slate-300">触发 {{ item.left_signals?.filter(s => s.triggered).length || 0 }}/5</span>
+                </div>
+                <div v-if="!item.left_signals?.length" class="text-slate-500 text-[10px]">无信号触发</div>
+                <div v-else class="space-y-1">
+                  <div
+                    v-for="sig in item.left_signals"
+                    :key="sig.type"
+                    class="text-[10px] flex items-start gap-1"
+                    :class="sig.triggered ? 'text-emerald-300' : 'text-slate-500'"
+                  >
+                    <span class="shrink-0">{{ sig.triggered ? '✅' : '○' }}</span>
+                    <span class="flex-1">
+                      <span class="font-semibold">{{ sig.name }}</span>
+                      <span v-if="sig.triggered && sig.conditions_met?.length" class="text-slate-400 block text-[9.5px]">
+                        {{ sig.conditions_met.join(' · ') }}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <!-- 前瞻催化与预期差逻辑 -->
@@ -292,7 +388,7 @@ function hasDetail(item) {
               </div>
             </div>
 
-            <!-- v4.3: 📊 技术指标明细 + 📰 消息面利好点 展开区（用户感兴趣可点） -->
+            <!-- v4.3: 📊 技术指标明细 + 📰 消息面利好点 + v4.4 LLM T1/T2/T3 + 右侧确认 展开区（用户感兴趣可点） -->
             <div v-if="hasDetail(item)" class="space-y-2 pt-1">
               <button
                 @click="toggleDetail(idx)"
@@ -301,9 +397,9 @@ function hasDetail(item) {
               >
                 <span class="flex items-center gap-2">
                   <span class="text-blue-300">🔍</span>
-                  <span class="text-slate-200">感兴趣？展开技术指标 + 消息面利好点详情</span>
+                  <span class="text-slate-200">感兴趣？展开技术指标 + 消息面利好点 + LLM 验证详情</span>
                   <span class="rpt-badge bg-slate-800 text-slate-300 border border-slate-600 font-mono">
-                    {{ (item.tech_indicators?.length || 0) + (item.news_highlights?.length || 0) }} 项
+                    {{ (item.tech_indicators?.length || 0) + (item.news_highlights?.length || 0) + (item.llm_verification?.t1_message ? 1 : 0) + (item.llm_verification?.t2_technical ? 1 : 0) + (item.llm_verification?.t3_cross ? 1 : 0) }} 项
                   </span>
                 </span>
                 <span class="text-slate-400 font-mono">{{ expanded[idx] ? '▲ 收起' : '▼ 展开' }}</span>
@@ -363,6 +459,135 @@ function hasDetail(item) {
                           <span v-if="nh.source" class="text-slate-600">{{ nh.source }}</span>
                         </div>
                       </div>
+                    </div>
+                  </div>
+                </div>
+
+                <!-- v4.4: 🛡️ T1 消息面真实性验证 (假政策检测) -->
+                <div v-if="item.llm_verification?.t1_message" class="p-2 rounded bg-amber-950/20 border border-amber-900/40 space-y-1.5">
+                  <div class="text-[11px] font-bold text-amber-300 flex items-center justify-between">
+                    <span>🛡️ T1 消息面真实性验证 (防假政策)</span>
+                    <span class="font-mono text-[10px] text-slate-400">
+                      真实分 {{ item.llm_verification.t1_message.real_score ?? '—' }}
+                      · 信心 {{ Math.round((item.llm_verification.t1_message.confidence || 0) * 100) }}%
+                    </span>
+                  </div>
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10.5px]">
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">真实情感</div>
+                      <div class="text-slate-200 font-mono">{{ item.llm_verification.t1_message.real_sentiment }}</div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">假政策风险</div>
+                      <div class="font-mono" :class="item.llm_verification.t1_message.fake_news_risk === 'low' ? 'text-emerald-300' : (item.llm_verification.t1_message.fake_news_risk === 'high' ? 'text-red-300' : 'text-amber-300')">
+                        {{ item.llm_verification.t1_message.fake_news_risk }}
+                      </div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded col-span-2">
+                      <div class="text-slate-500 text-[9.5px]">关键催化剂</div>
+                      <div class="text-emerald-200 text-[10.5px]">
+                        {{ (item.llm_verification.t1_message.key_catalysts || []).join(' · ') || '—' }}
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="item.llm_verification.t1_message.title_tricks?.length" class="text-[10.5px] text-red-300/90">
+                    ⚠️ 标题误导：{{ item.llm_verification.t1_message.title_tricks.join(' · ') }}
+                  </div>
+                  <div v-if="item.llm_verification.t1_message.summary" class="text-[10.5px] text-slate-300 leading-relaxed">
+                    {{ item.llm_verification.t1_message.summary }}
+                  </div>
+                </div>
+
+                <!-- v4.4: 🐂 T2 技术面操盘意图验证 (防假突破) -->
+                <div v-if="item.llm_verification?.t2_technical" class="p-2 rounded bg-sky-950/20 border border-sky-900/40 space-y-1.5">
+                  <div class="text-[11px] font-bold text-sky-300 flex items-center justify-between">
+                    <span>🐂 T2 技术面操盘意图 (防假突破)</span>
+                    <span class="font-mono text-[10px] text-slate-400">
+                      真实分 {{ item.llm_verification.t2_technical.real_score ?? '—' }}
+                      · 信心 {{ Math.round((item.llm_verification.t2_technical.confidence || 0) * 100) }}%
+                    </span>
+                  </div>
+                  <div class="grid grid-cols-2 sm:grid-cols-4 gap-1.5 text-[10.5px]">
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">操盘意图</div>
+                      <div class="text-slate-200 font-mono">{{ getIntentLabel(item.llm_verification.t2_technical.intent) }}</div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">假突破风险</div>
+                      <div class="font-mono" :class="item.llm_verification.t2_technical.breakout_fake_risk === 'low' ? 'text-emerald-300' : (item.llm_verification.t2_technical.breakout_fake_risk === 'high' ? 'text-red-300' : 'text-amber-300')">
+                        {{ item.llm_verification.t2_technical.breakout_fake_risk }}
+                      </div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">关键阻力</div>
+                      <div class="text-red-200 font-mono">{{ item.llm_verification.t2_technical.key_resistance || '—' }}</div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">关键支撑</div>
+                      <div class="text-emerald-200 font-mono">{{ item.llm_verification.t2_technical.key_support || '—' }}</div>
+                    </div>
+                  </div>
+                  <div v-if="item.llm_verification.t2_technical.fake_break_reasons?.length" class="text-[10.5px] text-red-300/90">
+                    ⚠️ 假突破疑点：{{ item.llm_verification.t2_technical.fake_break_reasons.join(' · ') }}
+                  </div>
+                  <div v-if="item.llm_verification.t2_technical.summary" class="text-[10.5px] text-slate-300 leading-relaxed">
+                    {{ item.llm_verification.t2_technical.summary }}
+                  </div>
+                </div>
+
+                <!-- v4.4: 🧭 T3 跨维度一致性验证 (防虚假一致) -->
+                <div v-if="item.llm_verification?.t3_cross" class="p-2 rounded bg-purple-950/20 border border-purple-900/40 space-y-1.5">
+                  <div class="text-[11px] font-bold text-purple-300 flex items-center justify-between">
+                    <span>🧭 T3 跨维度一致性 (防虚假一致)</span>
+                    <span class="font-mono text-[10px] text-slate-400">
+                      一致性 {{ item.llm_verification.t3_cross.coherence_score ?? '—' }}
+                      · 可信度 {{ item.llm_verification.t3_cross.trustworthiness }}
+                    </span>
+                  </div>
+                  <div class="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[10.5px]">
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">消息面 ↔ 资金面</div>
+                      <div class="font-mono" :class="(item.llm_verification.t3_cross.dimension_alignment?.msg_capital || 'weak') === 'consistent' ? 'text-emerald-300' : ((item.llm_verification.t3_cross.dimension_alignment?.msg_capital || 'weak') === 'contradict' ? 'text-red-300' : 'text-amber-300')">
+                        {{ item.llm_verification.t3_cross.dimension_alignment?.msg_capital || 'weak' }}
+                      </div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">技术面 ↔ 情绪面</div>
+                      <div class="font-mono" :class="(item.llm_verification.t3_cross.dimension_alignment?.tech_sentiment || 'weak') === 'consistent' ? 'text-emerald-300' : ((item.llm_verification.t3_cross.dimension_alignment?.tech_sentiment || 'weak') === 'weak' ? 'text-amber-300' : 'text-red-300')">
+                        {{ item.llm_verification.t3_cross.dimension_alignment?.tech_sentiment || 'weak' }}
+                      </div>
+                    </div>
+                    <div class="bg-slate-900/60 px-1.5 py-1 rounded">
+                      <div class="text-slate-500 text-[9.5px]">虚假一致性</div>
+                      <div class="font-mono" :class="item.llm_verification.t3_cross.fake_consistency === 'low' ? 'text-emerald-300' : (item.llm_verification.t3_cross.fake_consistency === 'high' ? 'text-red-300' : 'text-amber-300')">
+                        {{ item.llm_verification.t3_cross.fake_consistency }}
+                      </div>
+                    </div>
+                  </div>
+                  <div v-if="item.llm_verification.t3_cross.hidden_contradictions?.length" class="text-[10.5px] text-red-300/90">
+                    ⚠️ 隐藏矛盾：{{ item.llm_verification.t3_cross.hidden_contradictions.join(' · ') }}
+                  </div>
+                  <div v-if="item.llm_verification.t3_cross.alerts?.length" class="text-[10.5px] text-amber-300/90">
+                    🔔 警示：{{ item.llm_verification.t3_cross.alerts.join(' · ') }}
+                  </div>
+                  <div v-if="item.llm_verification.t3_cross.summary" class="text-[10.5px] text-slate-300 leading-relaxed">
+                    {{ item.llm_verification.t3_cross.summary }}
+                  </div>
+                </div>
+
+                <!-- v4.4: 右侧确认清单 (TRADING_LOGIC 第 4.3 节) -->
+                <div v-if="item.right_side_confirmations?.length" class="p-2 rounded bg-slate-950/40 border border-slate-800 space-y-1">
+                  <div class="text-[11px] font-bold text-slate-300 flex items-center gap-1">
+                    ⏳ 右侧确认清单（任一触发再加仓）
+                  </div>
+                  <div class="grid grid-cols-1 sm:grid-cols-2 gap-1 text-[10.5px]">
+                    <div
+                      v-for="(rc, rci) in item.right_side_confirmations"
+                      :key="rci"
+                      class="flex items-center gap-1.5 text-slate-400"
+                    >
+                      <span class="text-slate-600">☐</span>
+                      <span>{{ rc.name }}</span>
                     </div>
                   </div>
                 </div>

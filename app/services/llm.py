@@ -1500,6 +1500,8 @@ SECTOR_DISCOVER_SYSTEM_PROMPT = (
     "严禁修改、新增或编造。\n"
     "3. 你的注解必须引用【给定的新闻证据】，禁止编造新闻标题或时间。\n"
     "4. 个股注解只能从【给定板块代表股池】中挑选，禁止新增股票代码。\n"
+    "5. v4.4 升级：你需要做【三层验证】(T1 消息面真实性 / T2 技术面操盘意图 / T3 跨维度一致性)，"
+    "解决量化框架的 3 大盲区：假政策 / 假突破 / 虚假一致。\n"
     "请严格输出合法 JSON。"
 )
 
@@ -1540,6 +1542,49 @@ SECTOR_DISCOVER_USER_PROMPT = """请为以下量化引擎筛选出的【低位�
   }}
 - level: "高" / "中"（基于催化强度与位置安全边际判断）
 - risk_warning: ≤50字的风控与认错撤退纪律
+- t1_message: **v4.4 新增 T1 消息面真实性验证** (对象, 必填):
+    {{
+      "real_sentiment": "positive" | "negative" | "neutral" | "mixed",
+      "real_score": 0-100,            // 真实消息面分（覆盖引擎占位 50）
+      "confidence": 0.1-1.0,
+      "key_catalysts": ["催化剂1", "催化剂2"],   // 1-3 条, 引用给定新闻证据
+      "fake_news_risk": "low" | "medium" | "high",   // 假政策风险
+      "title_tricks": ["标题潜在误导点1"],          // 可空 []
+      "summary": "1-2 句话真实情况总结"
+    }}
+- t2_technical: **v4.4 新增 T2 技术面操盘意图验证** (对象, 必填):
+    {{
+      "intent": "accumulation" | "shakeout" | "markup" | "distribution" | "consolidation",
+      "real_score": 0-100,            // 真实技术面分
+      "confidence": 0.1-1.0,
+      "key_resistance": 整数价格,
+      "key_support": 整数价格,
+      "breakout_fake_risk": "low" | "medium" | "high",
+      "fake_break_reasons": ["可能假突破原因1"],
+      "next_5d_scenarios": [
+        {{"scenario": "情景名", "probability": 0.0-1.0, "target_price": 整数, "trigger": "触发条件"}}
+      ],
+      "summary": "1-2 句话技术面总结"
+    }}
+- t3_cross: **v4.4 新增 T3 跨维度一致性验证** (对象, 必填):
+    {{
+      "coherence_score": 0-100,            // 一致性分 (T1 30% + T2 30% + T3 40% 加权得 final_score)
+      "fake_consistency": "low" | "medium" | "high",   // 虚假一致性风险
+      "hidden_contradictions": ["矛盾1"],   // 可空 []
+      "dimension_alignment": {{
+        "msg_capital": "consistent" | "weak" | "contradict",
+        "tech_sentiment": "consistent" | "weak" | "contradict"
+      }},
+      "trustworthiness": "high" | "medium" | "low",   // 整体可信度
+      "alerts": ["警示1"],
+      "summary": "1-2 句话一致性总结"
+    }}
+- final_score: 0-100, **综合分** (T1.real_score*0.3 + T2.real_score*0.3 + T3.coherence_score*0.4)
+- action: "STRONG_BUY" | "BUY" | "WATCH" | "PASS" (决策)
+    - STRONG_BUY: trustworthiness=high 且 final_score>=70
+    - BUY: trustworthiness=high 且 final_score>=60
+    - WATCH: trustworthiness=medium 且 final_score>=65
+    - PASS: 其他
 
 【输出 schema（严格 JSON，只输出数组）】
 [
@@ -1551,7 +1596,12 @@ SECTOR_DISCOVER_USER_PROMPT = """请为以下量化引擎筛选出的【低位�
     "news_highlights": [...],
     "stocks": [...],
     "level": "高",
-    "risk_warning": "..."
+    "risk_warning": "...",
+    "t1_message": {{"real_sentiment": "positive", "real_score": 78, "confidence": 0.85, "key_catalysts": [...], "fake_news_risk": "low", "title_tricks": [], "summary": "..."}},
+    "t2_technical": {{"intent": "accumulation", "real_score": 72, "confidence": 0.80, "key_resistance": 1850, "key_support": 1620, "breakout_fake_risk": "low", "fake_break_reasons": [], "next_5d_scenarios": [...], "summary": "..."}},
+    "t3_cross": {{"coherence_score": 85, "fake_consistency": "low", "hidden_contradictions": [], "dimension_alignment": {{...}}, "trustworthiness": "high", "alerts": [], "summary": "..."}},
+    "final_score": 79.3,
+    "action": "STRONG_BUY"
   }},
   ...
 ]
@@ -1719,7 +1769,66 @@ def _merge_sector_annotations(
                 if ordered:
                     discovery["stocks"] = ordered
 
-            if catalyst_logic or trigger or risk:
+            # ===== v4.4: 合并 LLM T1/T2/T3 三段验证 + action =====
+            t1 = ann.get("t1_message") or {}
+            t2 = ann.get("t2_technical") or {}
+            t3 = ann.get("t3_cross") or {}
+            if isinstance(t1, dict) and t1:
+                discovery["llm_verification"]["t1_message"] = {
+                    "real_sentiment": str(t1.get("real_sentiment", "neutral")),
+                    "real_score": t1.get("real_score", 50),
+                    "confidence": t1.get("confidence", 0.5),
+                    "key_catalysts": t1.get("key_catalysts", [])[:3] if isinstance(t1.get("key_catalysts"), list) else [],
+                    "fake_news_risk": str(t1.get("fake_news_risk", "medium")),
+                    "title_tricks": t1.get("title_tricks", []) if isinstance(t1.get("title_tricks"), list) else [],
+                    "summary": str(t1.get("summary", ""))[:300],
+                }
+                # 用 T1 真实验证分覆盖 score_4d.msg
+                if t1.get("real_score") and isinstance(t1.get("real_score"), (int, float)):
+                    s4 = discovery.get("score_4d", {})
+                    s4["msg"] = round(float(t1["real_score"]), 1)
+                    s4["total"] = round((s4.get("msg", 50) + s4.get("cap", 50) + s4.get("tech", 50) + s4.get("sent", 50)) / 4.0, 1)
+                    s4["grade"] = "A" if s4["total"] >= 80 else ("B" if s4["total"] >= 65 else ("C" if s4["total"] >= 50 else "D"))
+            if isinstance(t2, dict) and t2:
+                discovery["llm_verification"]["t2_technical"] = {
+                    "intent": str(t2.get("intent", "consolidation")),
+                    "real_score": t2.get("real_score", 50),
+                    "confidence": t2.get("confidence", 0.5),
+                    "key_resistance": t2.get("key_resistance", 0),
+                    "key_support": t2.get("key_support", 0),
+                    "breakout_fake_risk": str(t2.get("breakout_fake_risk", "medium")),
+                    "fake_break_reasons": t2.get("fake_break_reasons", []) if isinstance(t2.get("fake_break_reasons"), list) else [],
+                    "next_5d_scenarios": t2.get("next_5d_scenarios", []) if isinstance(t2.get("next_5d_scenarios"), list) else [],
+                    "summary": str(t2.get("summary", ""))[:300],
+                }
+            if isinstance(t3, dict) and t3:
+                discovery["llm_verification"]["t3_cross"] = {
+                    "coherence_score": t3.get("coherence_score", 50),
+                    "fake_consistency": str(t3.get("fake_consistency", "medium")),
+                    "hidden_contradictions": t3.get("hidden_contradictions", []) if isinstance(t3.get("hidden_contradictions"), list) else [],
+                    "dimension_alignment": t3.get("dimension_alignment", {}) if isinstance(t3.get("dimension_alignment"), dict) else {},
+                    "trustworthiness": str(t3.get("trustworthiness", "medium")),
+                    "alerts": t3.get("alerts", []) if isinstance(t3.get("alerts"), list) else [],
+                    "summary": str(t3.get("summary", ""))[:300],
+                }
+            # final_score = T1.real_score*30% + T2.real_score*30% + T3.coherence_score*40%
+            t1s = discovery["llm_verification"]["t1_message"]["real_score"] if discovery["llm_verification"]["t1_message"] else 50
+            t2s = discovery["llm_verification"]["t2_technical"]["real_score"] if discovery["llm_verification"]["t2_technical"] else 50
+            t3s = discovery["llm_verification"]["t3_cross"]["coherence_score"] if discovery["llm_verification"]["t3_cross"] else 50
+            final = t1s * 0.3 + t2s * 0.3 + t3s * 0.4
+            trust = discovery["llm_verification"]["t3_cross"]["trustworthiness"] if discovery["llm_verification"]["t3_cross"] else "medium"
+            if trust == "high" and final >= 70:
+                action = "STRONG_BUY"
+            elif trust == "high" and final >= 60:
+                action = "BUY"
+            elif trust == "medium" and final >= 65:
+                action = "WATCH"
+            else:
+                action = "PASS"
+            discovery["llm_verification"]["final_score"] = round(final, 1)
+            discovery["llm_verification"]["action"] = action
+
+            if catalyst_logic or trigger or risk or t1 or t2 or t3:
                 matched_count += 1
 
         discovery["verification"] = {"status": "confirmed" if ann else "unverified", "risks": [], "referenced_news_ids": []}

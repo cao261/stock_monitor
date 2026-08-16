@@ -575,3 +575,247 @@ def calculate_stock_ambush_levels(
     }
 
 
+# ====================== v4.3: 4 维评分 + 5 大左侧信号 (集成自 sector_hunter TRADING_LOGIC.md) ======================
+# 4 维：消息面 (msg) / 资金面 (cap) / 技术面 (tech) / 情绪面 (sent)，各 0-100
+# 5 大左侧信号：底部吸筹 / 政策反转 / 动量反转 / 资金异动 / 事件预热
+# 数据源：fund_flow_cache (板块资金流) + all_stocks_cache (全市场) + news_fetcher (新闻)
+def score_sector_4d(sector_name: str, sector_data: dict | None = None) -> dict:
+    """对单个板块（来自 fund_flow_cache）做 4 维量化评分（0-100）。
+
+    简化版（区别于 sector_hunter 的复杂 11 子项）：
+    - 资金面（30%）：net_amount（主力净流入）+ leading_change_pct（领涨股涨幅）
+    - 技术面（25%）：板块当日 change_pct + 领涨股 leading_change_pct
+    - 消息面（30%）：由 LLM T1 阶段验证后给出（此处仅占位 50 分中性分）
+    - 情绪面（15%）：change_pct 越低（低位）得分越高（散户没注意 = 反向利多）
+
+    Returns:
+        dict: { msg, cap, tech, sent, total, grade, breakdown }
+    """
+    import market_fetcher as mf
+    if sector_data is None:
+        fund = mf.get_fund_flow()
+        for s in fund.get("data", []):
+            if s.get("name") == sector_name:
+                sector_data = s
+                break
+    if not sector_data:
+        return {"msg": 50.0, "cap": 50.0, "tech": 50.0, "sent": 50.0, "total": 50.0, "grade": "C", "breakdown": {}}
+
+    net_amount = float(sector_data.get("net_amount", 0) or 0)
+    leading_chg = float(sector_data.get("leading_change_pct", 0) or 0)
+    sector_chg = float(sector_data.get("change_pct", 0) or 0)
+    company_count = int(sector_data.get("company_count", 0) or 0)
+
+    # ===== 资金面 (30%)：net_amount 是核心 =====
+    # -10亿 = 0分, 0 = 50分, +10亿 = 75分, +50亿 = 100分
+    cap_raw = 50 + net_amount * 2.5
+    cap = max(0.0, min(100.0, cap_raw))
+
+    # ===== 技术面 (25%)：板块当日 + 领涨股 =====
+    # 0% = 50分, +5% = 75分, -5% = 25分（缩量企稳得分高）
+    tech_raw = 50 + (sector_chg * 5) + (leading_chg * 2)
+    tech = max(0.0, min(100.0, tech_raw))
+
+    # ===== 消息面 (30%)：占位 50 分（实际由 LLM T1 验证后给出 real_score 覆盖） =====
+    msg = 50.0
+
+    # ===== 情绪面 (15%)：低位 + 散户没注意 = 反向利多 =====
+    # 涨幅 0% = 50分, +5% = 30分 (高位散户涌入是反向), -5% = 70分 (低位无人问津)
+    sent_raw = 50 - (sector_chg * 4)
+    sent = max(0.0, min(100.0, sent_raw))
+
+    # ===== 总分 (4 维加权平均) =====
+    total = msg * 0.30 + cap * 0.30 + tech * 0.25 + sent * 0.15
+
+    # ===== 等级 (A/B/C/D) =====
+    if total >= 80:
+        grade = "A"
+    elif total >= 65:
+        grade = "B"
+    elif total >= 50:
+        grade = "C"
+    else:
+        grade = "D"
+
+    return {
+        "msg": round(msg, 1),
+        "cap": round(cap, 1),
+        "tech": round(tech, 1),
+        "sent": round(sent, 1),
+        "total": round(total, 1),
+        "grade": grade,
+        "breakdown": {
+            "net_amount": net_amount,
+            "leading_change_pct": leading_chg,
+            "sector_change_pct": sector_chg,
+            "company_count": company_count,
+        },
+    }
+
+
+def detect_left_side_signals(
+    sector_name: str,
+    sector_data: dict | None = None,
+    quant_scores: dict | None = None,
+    news: list[dict] | None = None,
+) -> list[dict]:
+    """检测板块是否触发 5 大左侧信号 (来自 sector_hunter TRADING_LOGIC 第 2.2 节)。
+
+    Returns:
+        list[dict]: [{"name": "底部吸筹型", "triggered": True, "conditions_met": ["价格分位 ≤ 30%", ...]}, ...]
+    """
+    import market_fetcher as mf
+    if sector_data is None:
+        fund = mf.get_fund_flow()
+        for s in fund.get("data", []):
+            if s.get("name") == sector_name:
+                sector_data = s
+                break
+    if not sector_data:
+        return []
+
+    sector_chg = float(sector_data.get("change_pct", 0) or 0)
+    leading_chg = float(sector_data.get("leading_change_pct", 0) or 0)
+    net_amount = float(sector_data.get("net_amount", 0) or 0)
+    company_count = int(sector_data.get("company_count", 0) or 0)
+
+    signals: list[dict] = []
+
+    # ① 底部吸筹：低涨幅 + 净流入 + 新闻平稳
+    if -3.0 <= sector_chg <= 1.5 and net_amount > 0:
+        # 检查新闻关键词（避免大涨/事件扰动）
+        news_count = len(news) if news else 0
+        cond = [
+            f"板块涨幅 {sector_chg:+.2f}%（低位蓄势）",
+            f"主力净流入 {net_amount:+.2f} 亿",
+            f"新闻数 {news_count} 条（{('平稳' if news_count <= 5 else '偏热')}）",
+        ]
+        signals.append({
+            "name": "底部吸筹型",
+            "type": "bottom_accumulation",
+            "triggered": True,
+            "description": "聪明钱在底部建仓，散户毫无察觉，教科书级左侧机会",
+            "conditions_met": cond,
+        })
+
+    # ② 政策反转：低涨幅 + 净流入 + 新闻含政策/利好关键词
+    if news:
+        policy_keywords = ["政策", "利好", "支持", "补贴", "印发", "规划", "部署", "推进", "试点"]
+        news_with_policy = [n for n in news if any(kw in (n.get("title", "") or n.get("content", "")) for kw in policy_keywords)]
+        if news_with_policy and -5.0 <= sector_chg <= 2.0 and net_amount > 0:
+            signals.append({
+                "name": "政策驱动反转型",
+                "type": "policy_reversal",
+                "triggered": True,
+                "description": "重大政策发布 + 板块前期超跌 + 市场未充分反应",
+                "conditions_met": [
+                    f"近 3 天含政策/利好新闻 {len(news_with_policy)} 条",
+                    f"板块涨幅 {sector_chg:+.2f}%（未充分反应）",
+                    f"主力净流入 {net_amount:+.2f} 亿",
+                ],
+            })
+
+    # ③ 动量反转：领涨股已反弹 + 板块整体仍弱
+    if leading_chg > 2.0 and sector_chg < 1.5:
+        signals.append({
+            "name": "动量反转型",
+            "type": "momentum_reversal",
+            "triggered": True,
+            "description": "领涨股已启动，板块整体未跟上，存在补涨空间",
+            "conditions_met": [
+                f"领涨股已涨 {leading_chg:+.2f}%",
+                f"板块整体仅 {sector_chg:+.2f}%（跟涨滞后）",
+            ],
+        })
+
+    # ④ 资金异动：净流入显著（>2亿）+ 板块未大涨
+    if net_amount > 2.0 and sector_chg < 3.0:
+        signals.append({
+            "name": "资金底部异动型",
+            "type": "capital_turn",
+            "triggered": True,
+            "description": "主力大额流入，但价格还没启动——先知先觉者入场",
+            "conditions_met": [
+                f"主力净流入 {net_amount:+.2f} 亿（> 2 亿阈值）",
+                f"板块涨幅 {sector_chg:+.2f}%（未启动）",
+            ],
+        })
+
+    # ⑤ 事件预热：新闻含事件关键词 + 板块小幅异动
+    if news:
+        event_keywords = ["大会", "会议", "发布", "开幕", "闭幕", "启动", "揭牌", "奠基", "首飞", "量产", "上市", "通车"]
+        news_with_event = [n for n in news if any(kw in (n.get("title", "") or n.get("content", "")) for kw in event_keywords)]
+        if news_with_event and 0.5 <= sector_chg <= 5.0:
+            signals.append({
+                "name": "事件预热型",
+                "type": "event_warmup",
+                "triggered": True,
+                "description": "事件还没发生，但市场已开始定价",
+                "conditions_met": [
+                    f"近 7 天含事件性新闻 {len(news_with_event)} 条",
+                    f"板块近 3 日 {sector_chg:+.2f}%（开始异动）",
+                ],
+            })
+
+    return signals
+
+
+def filter_low_ambush_sectors(top_n: int = 5) -> list[dict]:
+    """从 fund_flow_cache 筛选"低位埋伏"候选板块：
+    - 净流入为正（资金在动）
+    - 当日涨幅 -2% ~ +3.8%（未启动 / 刚启动）
+    - 至少 3 只成分股（板块有意义）
+    按净流入排序取 top_n。
+
+    Returns:
+        list[dict]: [{name, change_pct, net_amount, leading_stock, leading_change_pct, company_count}, ...]
+    """
+    import market_fetcher as mf
+    fund = mf.get_fund_flow()
+    sectors_all = list(fund.get("data", []))
+    # 过滤：净流入 > 0 + 涨幅温和 + 至少 3 只成分股
+    candidates = [
+        s for s in sectors_all
+        if (s.get("net_amount") or 0) > 0
+        and -2.0 <= (s.get("change_pct") or 0) <= 3.8
+        and (s.get("company_count") or 0) >= 3
+    ]
+    # 按净流入降序
+    candidates.sort(key=lambda s: s.get("net_amount", 0), reverse=True)
+    return candidates[:top_n]
+
+
+def merge_sector_news(sector_name: str, news: list[dict], max_n: int = 8) -> list[dict]:
+    """从原始 news 池中按 sector 关键词匹配相关消息。
+
+    Returns:
+        list[dict]: [{title, time, source, content}, ...] 最多 max_n 条
+    """
+    if not news or not sector_name:
+        return []
+    import re
+    parts = re.split(r"[\s,，、/／与和及()()（）]+", sector_name)
+    keywords = {p for p in parts if len(p) >= 2}
+    # 滑窗拆 2~3 字子词
+    for p in list(keywords):
+        for wlen in (2, 3):
+            for i in range(0, max(0, len(p) - wlen + 1)):
+                keywords.add(p[i:i + wlen])
+    if not keywords:
+        keywords = {sector_name[:4]}
+
+    matched = []
+    for n in news:
+        title = (n.get("title") or n.get("content", "")[:80]) or ""
+        if any(kw in title for kw in keywords):
+            matched.append({
+                "title": str(title)[:80],
+                "time": n.get("time", ""),
+                "source": n.get("source", ""),
+                "content": str(n.get("content", ""))[:200],
+            })
+        if len(matched) >= max_n:
+            break
+    return matched
+
+

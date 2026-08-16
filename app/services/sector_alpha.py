@@ -824,6 +824,27 @@ def sector_to_discovery(sector: dict[str, Any]) -> dict[str, Any]:
     for s in stocks:
         s["stock_logic"] = f"{stock_logic} {s.get('stock_logic', '')}"[:400]
 
+    # ===== v4.4 新增: 4 维评分 + 5 大左侧信号 (TRADING_LOGIC 第 2.1/2.2 节) =====
+    import analyzer  # 延迟引用, 避免循环
+    sector_4d = analyzer.score_sector_4d(sector["name"], ff)
+    score_4d = {
+        "msg": sector_4d["msg"],
+        "cap": sector_4d["cap"],
+        "tech": sector_4d["tech"],
+        "sent": sector_4d["sent"],
+        "total": round((sector_4d["msg"] + sector_4d["cap"] + sector_4d["tech"] + sector_4d["sent"]) / 4.0, 1),
+        "grade": sector_4d["grade"],
+    }
+    left_signals = analyzer.detect_left_side_signals(
+        sector["name"], ff, quant_scores=score_4d, news=news_hits,
+    )
+    right_side_confirmations = [
+        {"name": "突破 5 日均线", "triggered": False},
+        {"name": "板块当日涨幅 > 1% 且量能放大 50%", "triggered": False},
+        {"name": "MACD 金叉", "triggered": False},
+        {"name": "突破关键阻力位", "triggered": False},
+    ]
+
     # 距60日高点回撤 + 60日涨幅展示（板块级指标）
     return {
         "sector": sector["name"],
@@ -849,6 +870,17 @@ def sector_to_discovery(sector: dict[str, Any]) -> dict[str, Any]:
             "net_amount": (ff or {}).get("net_amount"),
             "company_count": (ff or {}).get("company_count"),
             "index_ready": True,
+        },
+        # ===== v4.4 新增 TRADING_LOGIC 字段 =====
+        "score_4d": score_4d,                          # 4 维量化评分
+        "left_signals": left_signals,                  # 5 大左侧信号触发
+        "right_side_confirmations": right_side_confirmations,  # 右侧确认清单
+        "llm_verification": {                          # LLM T1/T2/T3 验证 (LLM 调用后填充)
+            "t1_message": None,
+            "t2_technical": None,
+            "t3_cross": None,
+            "final_score": None,
+            "action": None,
         },
         "verification": {"status": "unverified", "risks": [], "referenced_news_ids": []},
     }
