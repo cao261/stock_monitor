@@ -23,6 +23,19 @@ from app.utils.trade_note_parser import parse_trade_note
 router = APIRouter(prefix="/strategy", tags=["strategy"])
 logger = logging.getLogger("strategy")
 
+# v4.4.1: /discover 结果缓存（LLM 全链路 150-280s，10 分钟内重复点击秒回）
+_DISCOVER_CACHE_TTL_SECONDS = 600
+_discover_cache: dict[str, dict] = {"ts": 0.0, "data": None}
+
+
+def _discover_cache_hit() -> dict | None:
+    if _discover_cache["data"] is None:
+        return None
+    age = datetime.now().timestamp() - _discover_cache["ts"]
+    if age > _DISCOVER_CACHE_TTL_SECONDS:
+        return None
+    return _discover_cache["data"]
+
 
 def get_today_trades(db: Session) -> list[dict]:
     """v3.0: 查今日（本地时间 00:00~23:59）的所有真实交割单。
@@ -342,12 +355,17 @@ async def discover() -> dict:
         except Exception:
             logger.warning("/discover news refresh failed", exc_info=True)
 
+    # v4.4.1: 10 分钟结果缓存（LLM 全链路太慢，重复点击秒回）
+    cached = _discover_cache_hit()
+    if cached is not None:
+        return cached
+
     # ===== v4.4 主路径：板块级引擎 =====
     from app.services import sector_alpha
     built = await sector_alpha.build_sector_candidates(all_stocks, news)
     if built["sectors"]:
         result = await llm.generate_sector_discover(built["sectors"], news)
-        return {
+        payload = {
             **result,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "meta": {
@@ -363,6 +381,9 @@ async def discover() -> dict:
                 "news_error": news_cache.get("error"),
             },
         }
+        _discover_cache["ts"] = datetime.now().timestamp()
+        _discover_cache["data"] = payload
+        return payload
 
     # ===== v4.1 降级路径：个股引擎（板块数据不可用/无候选时） =====
     from app.services.alpha_discovery import build_quantitative_candidates, preselect_codes

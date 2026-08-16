@@ -9,7 +9,9 @@ try:
     from dotenv import load_dotenv
     env_path = Path(__file__).resolve().parent.parent / ".env"
     if env_path.exists():
-        load_dotenv(env_path)
+        # override=True: .env 是唯一权威配置源，避免系统环境变量里的残留 key
+        # （如旧 AGNES_API_KEY）劫持配置 —— 实测残留导致 discover 一直走 agnes
+        load_dotenv(env_path, override=True)
 except ImportError:
     pass  # 没装 python-dotenv 也能跑（用系统环境变量）
 
@@ -46,7 +48,20 @@ LLM_TIMEOUT_SECONDS: float = float(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
 MINIMAX_API_KEY: str = os.environ.get("MINIMAX_API_KEY", LLM_API_KEY).strip()
 MINIMAX_BASE_URL: str = os.environ.get("MINIMAX_BASE_URL", LLM_BASE_URL).strip()
 MINIMAX_MODEL: str = os.environ.get("MINIMAX_MODEL", LLM_MODEL_NAME).strip()
-AGNES_API_KEY: str = os.environ.get("AGNES_API_KEY", "").strip()
+AGNES_API_KEY: str = ""
+# v4.4.1: AGNES_API_KEY 只认 .env 显式配置，忽略系统环境变量残留
+# （用户机器上残留 sk-WrB... 导致 discover 被 agnes 劫持/拖慢，.env 注释掉即禁用）
+try:
+    if env_path.exists():
+        for _line in env_path.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line.startswith("#") or "=" not in _line:
+                continue
+            if _line.split("=", 1)[0].strip() == "AGNES_API_KEY":
+                AGNES_API_KEY = _line.split("=", 1)[1].strip().strip('"').strip("'")
+                break
+except Exception:
+    pass
 AGNES_BASE_URL: str = os.environ.get("AGNES_BASE_URL", "https://apihub.agnes-ai.cn/v1").strip()
 AGNES_MODEL: str = os.environ.get("AGNES_MODEL", "agnes-2.5-flash").strip()
 AGNES_RPM: int = int(os.environ.get("AGNES_RPM", "20"))

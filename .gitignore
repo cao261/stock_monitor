@@ -78,3 +78,7 @@ _commit_msg_*.txt
 # v4.4: 板块指数K线磁盘缓存（运行时产物）
 app/data/
 data/_debug_llm/
+
+# 诊断脚本/产物（不入库）
+_diag_*.json
+_diag_*.ps1
