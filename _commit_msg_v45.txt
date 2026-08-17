@@ -1,0 +1,22 @@
+feat(v4.5): ETF 行情支持，AI 复盘读得到自选股 ETF 价格与浮盈亏
+
+问题: 自选股 sh589130(科创芯片ETF) 在 AI 复盘里 price/floating_pnl 全 null。
+根因两条:
+1. fetch_all_codes_sync 只拉 A 股股票，ETF 不在全市场代码清单，
+   行情只能靠 watchlist diff 兜底路径碰运气；
+2. daily-summary 读 sig.current.close / sig.floating_pnl，但 check_signals
+   从不返回这两个键 -> 所有自选股的复盘价格/浮盈亏其实都是 null（不只 ETF）。
+
+修复:
+- market_fetcher: 新增 fetch_etf_codes_sync(fund_etf_spot_em -> sh/sz 前缀,
+  磁盘缓存 24h)，fetch_all_codes_sync 合并 ETF 代码(5536+1577=7120)，
+  每 5s 全市场轮询直接覆盖 ETF; get_stock/get_history 入参归一化;
+  历史 K 线腾讯无数据时降级 fund_etf_hist_em
+- analyzer: check_signals 的 current 补 close 别名
+- strategy: daily-summary 按 watchlist.py 同口径补算浮盈亏
+  (有持仓+有价格才算, 空仓归 no_position); 异动龙头榜排除 ETF
+  (成交量单位 份/股 不可比, 避免成交榜被 ETF 挤占)
+
+验证(8765 临时实例实测): sh589130 price=1.512 floating_pnl=-356.0
+return_rate=-10.53% 归入 losers; 成交榜恢复 京东方A 20.7亿 -> 盈新发展 ->
+供销大集; 涨幅榜 戴维医疗/天山生物/电连技术 不变。U+FFFD 扫描 0。

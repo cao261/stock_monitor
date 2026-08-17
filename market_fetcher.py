@@ -115,6 +115,10 @@ from pathlib import Path
 # 本地代码清单缓存路径
 CODES_CACHE_FILE = Path(__file__).resolve().parent / "data" / "codes_cache.json"
 
+# 场内 ETF 代码清单缓存路径（v4.5：自选股 ETF 也能进每 5 秒全市场行情轮询）
+ETF_CODES_CACHE_FILE = Path(__file__).resolve().parent / "data" / "etf_codes_cache.json"
+ETF_CODES_MAX_AGE_HOURS = 24
+
 import concurrent.futures
 
 # ====================== 2. 拉代码清单（同步，run_in_executor 调用）======================
@@ -149,41 +153,118 @@ def _fetch_from_sina_codes() -> list[dict[str, str]]:
     return [it for page in pages for it in page]
 
 
+def _read_etf_codes_cache() -> tuple[list[dict[str, str]] | None, float | None]:
+    """读 ETF 代码磁盘缓存，返回 ``(items, age_seconds)``；无缓存/损坏返回 ``(None, None)``。"""
+    try:
+        if not ETF_CODES_CACHE_FILE.exists():
+            return None, None
+        raw = json.loads(ETF_CODES_CACHE_FILE.read_text(encoding="utf-8"))
+        items = raw.get("items", []) if isinstance(raw, dict) else []
+        if not isinstance(items, list) or not items:
+            return None, None
+        ts = raw.get("ts", "")
+        age = (datetime.now() - datetime.fromisoformat(ts)).total_seconds() if ts else None
+        return items, age
+    except Exception as e:
+        logger.warning("read ETF_CODES_CACHE_FILE failed: %r", e)
+        return None, None
+
+
+def _write_etf_codes_cache(items: list[dict[str, str]]) -> None:
+    try:
+        ETF_CODES_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        ETF_CODES_CACHE_FILE.write_text(
+            json.dumps(
+                {"ts": datetime.now().isoformat(timespec="seconds"), "items": items},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        logger.warning("save ETF_CODES_CACHE_FILE failed: %r", e)
+
+
+def fetch_etf_codes_sync() -> list[dict[str, str]]:
+    """从 akshare 拉场内 ETF 代码清单（东方财富 fund_etf_spot_em）。
+
+    返回 ``[{"code": "sh589130", "name": "科创芯片ETF易方达"}, ...]``。
+
+    - 代码统一转 sh/sz 前缀（5 开头 → sh，15/16/18 开头 → sz）
+    - 磁盘缓存 24h；网络失败时降级用过期缓存兜底。
+    """
+    cached_items, cached_age = _read_etf_codes_cache()
+    if cached_items and cached_age is not None and cached_age < ETF_CODES_MAX_AGE_HOURS * 3600:
+        return cached_items
+    try:
+        df = ak.fund_etf_spot_em()
+        seen: set[str] = set()
+        items: list[dict[str, str]] = []
+        for _, row in df.iterrows():
+            code = _normalize_code(str(row.get("代码", "")).strip())
+            name = str(row.get("名称", "")).strip()
+            if code and code not in seen:
+                seen.add(code)
+                items.append({"code": code, "name": name})
+        if items:
+            _write_etf_codes_cache(items)
+            logger.info("ETF codes refreshed: %d", len(items))
+            return items
+    except Exception as e:
+        logger.warning("ak.fund_etf_spot_em failed: %r", e)
+    if cached_items:
+        logger.warning("use stale ETF codes cache (%d items)", len(cached_items))
+        return cached_items
+    return []
+
+
 def fetch_all_codes_sync() -> list[dict[str, str]]:
-    """从 akshare / 新浪 / 磁盘拉全 A 股代码清单。返回 ``[{"code": "sh600000", "name": "..."}, ...]``。
-    
+    """从 akshare / 新浪 / 磁盘拉全 A 股 + ETF 代码清单。返回 ``[{"code": "sh600000", "name": "..."}, ...]``。
+
+    v4.5: 合并场内 ETF 代码（fund_etf_spot_em → sh/sz 前缀），自选股里的
+    科创芯片ETF(sh589130) 等也能进每 5 秒的全市场行情轮询。
     优化：若本地 data/codes_cache.json 存在且包含完整清单，优先毫秒级直接读取。
     """
+    out: list[dict[str, str]] = []
     # 0. 优先尝试本地有效磁盘缓存（毫秒级加载）
     if CODES_CACHE_FILE.exists():
         try:
             cached_data = json.loads(CODES_CACHE_FILE.read_text(encoding="utf-8"))
             if isinstance(cached_data, list) and len(cached_data) >= 3000:
-                return cached_data
+                out = cached_data
         except Exception as e:
             logger.warning("read CODES_CACHE_FILE failed: %r", e)
 
-    out: list[dict[str, str]] = []
-    # 1. 尝试 akshare
-    try:
-        df = ak.stock_info_a_code_name()
-        for _, row in df.iterrows():
-            raw_code = str(row.get("code", "")).strip()
-            name = str(row.get("code_name", "")).strip()
-            code = _normalize_code(raw_code)
-            if code and code != "sh" + "0" * 6:
-                out.append({"code": code, "name": name})
-    except Exception as e:
-        logger.warning("ak.stock_info_a_code_name failed: %r, trying sina fallback", e)
-
-    # 2. 尝试新浪备用源
-    if len(out) < 3000:
+    # 1-2. 网络拉股票（磁盘缓存不可用时才走网络）
+    if not out:
+        # 1. 尝试 akshare
         try:
-            sina_codes = _fetch_from_sina_codes()
-            if len(sina_codes) > len(out):
-                out = sina_codes
+            df = ak.stock_info_a_code_name()
+            for _, row in df.iterrows():
+                raw_code = str(row.get("code", "")).strip()
+                name = str(row.get("code_name", "")).strip()
+                code = _normalize_code(raw_code)
+                if code and code != "sh" + "0" * 6:
+                    out.append({"code": code, "name": name})
         except Exception as e:
-            logger.warning("sina fallback failed: %r, trying disk cache", e)
+            logger.warning("ak.stock_info_a_code_name failed: %r, trying sina fallback", e)
+
+        # 2. 尝试新浪备用源
+        if len(out) < 3000:
+            try:
+                sina_codes = _fetch_from_sina_codes()
+                if len(sina_codes) > len(out):
+                    out = sina_codes
+            except Exception as e:
+                logger.warning("sina fallback failed: %r, trying disk cache", e)
+
+    # 3. 合并场内 ETF 代码（v4.5）
+    try:
+        etf_codes = fetch_etf_codes_sync()
+        if etf_codes:
+            existing = {x["code"] for x in out}
+            out.extend(x for x in etf_codes if x["code"] not in existing)
+    except Exception as e:
+        logger.warning("merge ETF codes failed: %r", e)
 
     # 去重
     seen: set[str] = set()
@@ -383,8 +464,8 @@ def _cache_size() -> int:
 
 
 def get_stock(code: str) -> dict[str, Any] | None:
-    """读取单只股票快照。"""
-    return all_stocks_cache.get(code)
+    """读取单只股票快照（入参自动归一化 sh/sz 前缀，兼容 6 位纯数字）。"""
+    return all_stocks_cache.get(_normalize_code(code or ""))
 
 
 async def ensure_price_in_cache(code: str) -> dict[str, Any] | None:
@@ -449,6 +530,33 @@ def _empty_history() -> dict[str, Any]:
     }
 
 
+def _fetch_etf_history_fallback(code: str, days: int = HISTORY_FETCH_DAYS) -> list[dict[str, Any]]:
+    """东财单只 ETF 历史 K 线（腾讯无数据时的兜底），返回统一 record 结构。"""
+    try:
+        df = ak.fund_etf_hist_em(symbol=code[2:], period="daily", adjust="qfq")
+    except Exception as e:
+        logger.warning("fund_etf_hist_em(%s) failed: %r", code, e)
+        return []
+    if df is None or df.empty:
+        return []
+    out: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        try:
+            out.append(
+                {
+                    "date": str(row.get("日期", "")).strip(),
+                    "open": float(row.get("开盘", 0) or 0),
+                    "close": float(row.get("收盘", 0) or 0),
+                    "high": float(row.get("最高", 0) or 0),
+                    "low": float(row.get("最低", 0) or 0),
+                    "volume_lots": float(row.get("成交量", 0) or 0),  # 1 手 = 100 份
+                }
+            )
+        except (ValueError, TypeError):
+            continue
+    return out[-days:]
+
+
 def fetch_history_sync(code: str, days: int = HISTORY_FETCH_DAYS) -> dict[str, Any]:
     """从腾讯接口拉单只股票最近 N 个交易日的日 K 线。
 
@@ -478,8 +586,6 @@ def fetch_history_sync(code: str, days: int = HISTORY_FETCH_DAYS) -> dict[str, A
             return _empty_history()
         data = (payload.get("data") or {}).get(code) or {}
         klines = data.get("qfqday") or data.get("day") or []
-        if not klines:
-            return _empty_history()
         records: list[dict[str, Any]] = []
         for k in klines:
             # 字段：date, open, close, high, low, volume(手)
@@ -491,11 +597,14 @@ def fetch_history_sync(code: str, days: int = HISTORY_FETCH_DAYS) -> dict[str, A
                         "close": float(k[2]),
                         "high": float(k[3]),
                         "low": float(k[4]),
-                        "volume_lots": float(k[5]),  # 1 手 = 100 股
+                        "volume_lots": float(k[5]),  # 1 手 = 100 份
                     }
                 )
             except (ValueError, IndexError):
                 continue
+        if not records:
+            # v4.5: 腾讯没有该 ETF 的 K 线时，降级用东财 fund_etf_hist_em
+            records = _fetch_etf_history_fallback(code, days=days)
         if not records:
             return _empty_history()
         # 取最近 5 个交易日
@@ -544,7 +653,7 @@ async def fetch_history_for_codes(
 
 def get_history(code: str) -> dict[str, Any]:
     """读取单只股票历史快照。空时返回 ``_empty_history()`` 形状的 dict。"""
-    return history_cache.get(code) or _empty_history()
+    return history_cache.get(_normalize_code(code or "")) or _empty_history()
 
 
 async def ensure_history_for_codes(
@@ -662,10 +771,11 @@ async def periodic_fund_flow_loop() -> None:
 
 # ====================== 7. 每日刷新代码 ======================
 async def refresh_codes_daily() -> int:
-    """每日任务：akshare 拉代码 + 写入 ``__meta__``。返回代码条数。"""
+    """每日任务：akshare 拉代码（股票 + ETF）+ 写入 ``__meta__``。返回代码条数。"""
     loop = asyncio.get_running_loop()
     try:
         code_list = await loop.run_in_executor(None, fetch_all_codes_sync)
+        etf_list = await loop.run_in_executor(None, fetch_etf_codes_sync)
     except Exception:
         logger.exception("fetch codes from akshare failed")
         return 0
@@ -673,10 +783,11 @@ async def refresh_codes_daily() -> int:
         all_stocks_cache["__meta__"] = {
             **all_stocks_cache.get("__meta__", {}),
             "codes": [c["code"] for c in code_list],
+            "etf_codes": [c["code"] for c in etf_list],  # v4.5: 异动榜等按需排除 ETF
             "code_refreshed_at": datetime.now().isoformat(timespec="seconds"),
             "code_count": len(code_list),
         }
-    logger.info("refreshed %d stock codes", len(code_list))
+    logger.info("refreshed %d codes (incl. %d ETF)", len(code_list), len(etf_list))
     return len(code_list)
 
 

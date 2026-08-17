@@ -225,6 +225,7 @@ def check_signals(
         "volume_ratio": round(vol_ratio, 3),
         "current": {
             "price": price,
+            "close": price,  # v4.5: close 别名（strategy.py daily-summary 按 close 读价）
             "open": open_p,
             "prev_close": float(current.get("prev_close") or 0.0),
             "change_pct": chg,

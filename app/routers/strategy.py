@@ -103,11 +103,24 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
         ) or {}
         signals = sig.get("signals", {}) or {}
         current = sig.get("current", {}) or {}
+        # v4.5: check_signals 的 current 有 price 别名 close；兜底再取一次 price
         price = current.get("close")
+        if price is None:
+            price = current.get("price")
         cost = w.cost_price
         position = w.position
-        pnl = sig.get("floating_pnl")
-        ret = sig.get("return_rate")
+        # v4.5: check_signals 不算浮盈亏，这里按 watchlist.py 同口径补算
+        # （有持仓 + 有价格才算；空仓 / 缺价 → None → 归入 no_position）
+        pnl = None
+        ret = None
+        if price and price > 0 and cost is not None and position is not None and int(position) > 0:
+            try:
+                diff = float(price) - float(cost)
+                pnl = round(diff * int(position), 2)
+                ret = round(diff / float(cost) * 100.0, 2)
+            except (TypeError, ValueError):
+                pnl = None
+                ret = None
         # v2.6.2: 让 LLM 不用手算 —— 自动判断"trade_note 里的止损是否被破 / 止盈是否到"
         note_target_broken = False
         note_target_reached = False
@@ -193,6 +206,9 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
 
     # ===== 3. 全市场异动龙头 =====
     all_stocks = mf.get_all_stocks()
+    # v4.5: ETF 成交量单位是"份"，跟个股"股"不可比；异动龙头榜只展示个股
+    etf_codes = set(mf.get_meta().get("etf_codes") or [])
+    all_stocks = {c: d for c, d in all_stocks.items() if c not in etf_codes}
     # 涨幅榜 Top 3（保留 (code, d) tuples 以便拼装响应）
     by_chg = sorted(
         (
