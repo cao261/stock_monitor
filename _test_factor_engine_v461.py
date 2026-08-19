@@ -23,28 +23,28 @@ def fake_snap(price, op, high, low, vol, amt, chg=None, prev=None, name="X"):
 
 
 def test_snapshot_prefilter():
-    print("== 快照粗筛 ==")
+    print("== 快照粗筛 (v4.6.1.1: [0%, 9.5%] + 成交额>=5000万) ==")
     pool = [
-        # 涨幅 2.0% - 9.5% 之间，成交额 > 8000 万 → 通过
+        # 涨幅 0-9.5% + 成交额>=5000万 → 通过
         fake_snap(10.0, 9.5, 10.2, 9.4, 1_000_000, 10_000_000, chg=3.0, name="A"),
         fake_snap(15.0, 14.5, 15.2, 14.4, 800_000, 12_000_000, chg=5.0, name="B"),
         fake_snap(20.0, 19.5, 20.2, 19.4, 500_000, 10_000_000, chg=8.0, name="C"),
-        # 涨幅 < 2% → 拒
-        fake_snap(10.0, 10.0, 10.2, 9.8, 1_000_000, 10_000_000, chg=1.0, name="D"),
+        fake_snap(10.0, 10.0, 10.2, 9.8, 1_000_000, 10_000_000, chg=1.0, name="D"),  # 小幅翻红 [0%,9.5%] 通过
         # 涨幅 > 9.5% → 拒（一字板）
         fake_snap(10.0, 9.5, 10.2, 9.4, 1_000_000, 10_000_000, chg=10.0, name="E"),
-        # 涨幅在区间但成交额 < 8000 万 → 拒（微盘死水）
-        fake_snap(10.0, 9.5, 10.2, 9.4, 100_000, 5_000_000, chg=3.0, name="F"),
-        # 涨幅 < 0 → 拒
+        # 成交额 < 5000 万 → 拒（微盘死水）
+        fake_snap(10.0, 9.5, 10.2, 9.4, 100_000, 4_000_000, chg=3.0, name="F"),
+        # 涨幅 < 0 → 拒（一字跌停 / 弱势）
         fake_snap(10.0, 10.5, 10.2, 9.4, 1_000_000, 10_000_000, chg=-1.0, name="G"),
     ]
     members, codes = fe._snapshot_prefilter(pool, cap=10)
     passed_names = [m["name"] for m in members]
     print(f"  通过: {passed_names}")
-    assert set(passed_names) == {"A", "B", "C"}, f"应通过 A/B/C, got {passed_names}"
-    print("  涨幅 2-9.5% + 成交额>8000万 硬过滤通过 [OK]")
+    assert set(passed_names) == {"A", "B", "C", "D"}, f"应通过 A/B/C/D, got {passed_names}"
+    assert "E" not in passed_names and "F" not in passed_names and "G" not in passed_names
+    print("  涨幅 [0%, 9.5%] + 成交额>=5000万 硬过滤通过 [OK]")
 
-    # 排序：按 score=chg*log(vol) 降序，B 和 C 同 vol 但 B chg 更高 → B 排前
+    # 排序：按 score=chg*log(vol) 降序
     members_cap3, _ = fe._snapshot_prefilter(pool, cap=2)
     cap_names = [m["name"] for m in members_cap3]
     print(f"  cap=2 取 Top: {cap_names}")

@@ -307,9 +307,10 @@ async def run_multifactor_pipeline(
 #     → 用"全市场上涨 Top 200 + watchlist + 板块名匹配"近似候选股池
 
 # v4.6.1: 快照粗筛阈值（不依赖 K 线，纯内存计算）
-SNAPSHOT_CHANGE_MIN = 2.0         # 涨幅下限（%）：剔除一字跌停 + 弱势股
+# v4.6.1.1: 下限放宽到 0%（剔除一字跌停 + 一字涨停；接受小幅翻红股应对普跌日）
+SNAPSHOT_CHANGE_MIN = 0.0         # 涨幅下限（%）：剔除一字跌停；接受 0%-2% 小幅翻红
 SNAPSHOT_CHANGE_MAX = 9.5         # 涨幅上限（%）：剔除一字涨停（无参与空间）
-SNAPSHOT_MIN_AMOUNT = 8_000_000.0  # 当日成交额下限（元 = 8000 万）：剔除微盘死水
+SNAPSHOT_MIN_AMOUNT = 5_000_000.0  # 当日成交额下限（元 = 5000 万）：剔除微盘死水
 SNAPSHOT_TOP_PER_SECTOR = 5       # 每板块经粗筛后最多保留的候选股数
 
 
