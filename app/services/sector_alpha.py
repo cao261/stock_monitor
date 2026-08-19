@@ -552,108 +552,43 @@ def _score_sector(
     return score, b, ambush_type
 
 
-# ====================== 板块内个股落地 ======================
+# ====================== 板块内个股落地（v4.6 三层多因子硬过滤）======================
 def pick_sector_stocks(
     sector: dict[str, Any],
     all_stocks: dict[str, dict[str, Any]],
     news_hits: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """板块 → 代表股（领涨股优先，最多 MAX_STOCKS_PER_SECTOR 只）。
+    """v4.6: 板块 → 代表股由 factor_engine 三层硬过滤挑选，替代 v4.4 的
+    "领涨股 1 只 + 板块主词温和涨 1 只"启发式。
 
-    从全市场行情里按名称找领涨股代码；找不到则降级为当日温和上涨的
-    板块概念股（名称含板块主词）。每只返回支撑/压力/埋伏区（引擎计算）。
+    调用 factor_engine.pick_stocks_for_sector 走完整流水线：
+    - 候选股池 = 板块主词匹配全市场上涨 Top 50 + 领涨股
+    - 5 条个股硬过滤：MA 排列 / 距 20 日高 / VWAP 承接 / RVOL 区间 / 上影线
+    - 角色识别：容量中军 / 弹性先锋 / 一般
     """
-    from analyzer import calculate_stock_ambush_levels
-
-    stocks: list[dict[str, Any]] = []
+    from app.services import factor_engine
     ff = sector.get("fund_flow") or {}
     lead_name = str(ff.get("leading_stock") or "").strip()
-    lead_chg = ff.get("leading_change_pct", 0) or 0
-
     lead_code: str | None = None
-    for code, s in all_stocks.items():
-        if s.get("name") == lead_name:
-            lead_code = code
-            break
-    if lead_code is None and lead_name:
-        # 模糊匹配（领涨股名与实时行情名可能带后缀差异）
+    if lead_name:
         for code, s in all_stocks.items():
-            if s.get("name") and lead_name[:2] in s["name"]:
+            if s.get("name") == lead_name:
                 lead_code = code
                 break
-
-    if lead_code:
-        data = all_stocks.get(lead_code) or {}
-        price = float(data.get("price") or 0)
-        try:
-            chg = round(float(data.get("change_pct") or 0), 2)
-        except (TypeError, ValueError):
-            chg = lead_chg
-        tech = calculate_stock_ambush_levels(lead_code, cur_price=price or None)
-        if price > 0:
-            role = "领涨股"
-            if chg >= 5:
-                role = "领涨股(短线已热，等回踩低吸)"
-            stocks.append({
-                "code": lead_code,
-                "name": str(data.get("name") or lead_name),
-                "current_price": round(price, 2),
-                "change_pct": chg,
-                "role": role,
-                "support_price": tech["support_price"],
-                "support_name": tech["support_name"],
-                "resistance_price": tech["resistance_price"],
-                "resistance_name": tech["resistance_name"],
-                "volatility_tag": tech["volatility_tag"],
-                "technical_basis": tech["technical_basis"],
-                "ambush_zone": tech["ambush_zone"],
-                "target_win": tech["target_win"],
-                "stop_loss": tech["stop_loss"],
-                "stock_logic": f"「{sector['name']}」板块领涨股；{tech['technical_basis']}",
-            })
-
-    # 补充 1 只：板块主词匹配的概念股（取当日涨幅 0~3% 的温和标的）
-    if len(stocks) < MAX_STOCKS_PER_SECTOR:
-        sector_main = re.split(r"[\s,，、/／]+", sector["name"])[0][:4]
-        candidates: list[tuple[float, str]] = []
-        if len(sector_main) >= 2:
+        if lead_code is None:
             for code, s in all_stocks.items():
-                nm = str(s.get("name") or "")
-                if not nm or sector_main not in nm:
-                    continue
-                try:
-                    chg = float(s.get("change_pct") or 0)
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= chg <= 3.5 and float(s.get("price") or 0) > 0:
-                    candidates.append((chg, code))
-        candidates.sort(key=lambda x: -x[0])
-        for _chg, code in candidates[:2]:
-            if any(st["code"] == code for st in stocks):
-                continue
-            data = all_stocks.get(code) or {}
-            price = float(data.get("price") or 0)
-            tech = calculate_stock_ambush_levels(code, cur_price=price or None)
-            stocks.append({
-                "code": code,
-                "name": str(data.get("name") or code),
-                "current_price": round(price, 2),
-                "change_pct": round(float(data.get("change_pct") or 0), 2),
-                "role": "概念低位股",
-                "support_price": tech["support_price"],
-                "support_name": tech["support_name"],
-                "resistance_price": tech["resistance_price"],
-                "resistance_name": tech["resistance_name"],
-                "volatility_tag": tech["volatility_tag"],
-                "technical_basis": tech["technical_basis"],
-                "ambush_zone": tech["ambush_zone"],
-                "target_win": tech["target_win"],
-                "stop_loss": tech["stop_loss"],
-                "stock_logic": f"名称含「{sector_main}」概念；{tech['technical_basis']}",
-            })
-            if len(stocks) >= MAX_STOCKS_PER_SECTOR:
-                break
-    return stocks
+                if s.get("name") and lead_name[:2] in s["name"]:
+                    lead_code = code
+                    break
+    try:
+        return factor_engine.pick_stocks_for_sector(
+            sector_name=sector["name"],
+            all_stocks=all_stocks,
+            leading_code=lead_code,
+        )
+    except Exception as e:
+        logger.warning("pick_stocks_for_sector(%s) failed: %r, fallback empty", sector.get("name"), e)
+        return []
 
 
 # ====================== 板块候选构建（主入口） ======================

@@ -38,6 +38,8 @@ _verify*.py
 
 # v2.6.2: 本会话临时调试脚本（自动化 / 后端验证 / 数据库探针 / 日志）
 _check_*.py
+# 例外：正式单测要入仓
+!_test_factor_engine.py
 _test_*.py
 _test_*.js
 _diag_*.py

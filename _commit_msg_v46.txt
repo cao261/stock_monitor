@@ -1,0 +1,43 @@
+feat(v4.6): 三层多因子量化筛选引擎 + LLM 职责收敛到「逻辑利空校验」
+
+问题: 实盘确认 v4.1-v4.4 Alpha 发现抓的标的多是一日游噪音 / 假突破,
+根因是底层选股只用「领涨股 1 只 + 板块主词温和涨 1 只」启发式,
+LLM 实质上在替我们做选股(给到「未分类板块」+ 重复个股).
+
+重构: Python 量化因子硬过滤替代 LLM 选股, LLM 只做 150 字总结.
+
+新增 app/services/factor_engine.py (三层多因子 + 角色识别)
+- Layer 1 板块共振: up_ratio>=70% & change>=1.5% & 涨停>=2
+- Layer 2 个股多因子 (5 条硬过滤, 任一不满足即拒):
+  MA5/10/20 多头排列 / 距 20 日高 <=5% / 现价>VWAP(amt/vol 替代) /
+  RVOL 1.5~3.5 / 上影线 <=25%
+- Layer 3 角色识别: 容量中军 (成交额>=10亿) / 弹性先锋 (<=50 元 + RVOL>=2) / 一般
+- 不依赖东财个股接口 (用户机器 502): VWAP 用 amt/vol 近似, 角色用成交额+价格+RVOL
+
+改 sector_alpha.pick_sector_stocks: v4.4 启发式 -> factor_engine.pick_stocks_for_sector
+- 候选股池 = 板块主词匹配 + 全市场 (涨幅 x log(volume)) 兜底 (主词 <10 只时)
+- 主动用 ThreadPoolExecutor 补拉 history (写 mf.history_cache)
+- 输出 schema 不变 (LLM 消费兼容), 额外加 factor_score 字段
+
+改 llm.SECTOR_DISCOVER_SYSTEM_PROMPT: 显式约束 LLM
+- 个股已硬过滤, LLM 不得新增/替换/删除股票, 只能在给定池选 1~2 只
+- LLM 核心职责: 逻辑利空校验 (监管/业绩/解禁/减持) + 150 字操盘总结
+
+_test_factor_engine.py (单测, 14 个断言):
+- Layer 1: 4 个案例覆盖 up_ratio / 涨停 / 涨幅三条硬过滤接受+拒绝路径
+- Layer 2: 基准通过 + MA倒挂/距高/VWAP弱势/RVOL过热/长上影 5 条拒绝路径
+- Layer 3: 三个角色命中正确
+- Pipeline E2E: 1 板块过 + 2 只入选 (容量中军 + 弹性先锋) ✓
+
+端到端验证 (8765 临时实例, commit 11:11 数据):
+- /api/strategy/discover: engine_level=sector (不再 fallback_stock)
+- 6 个板块候选, 高股息精选 STRONG_BUY 65 分 + 5 个 PASS
+- stocks[].factor_score 字段: rvol/vwap_dev_pct/dist_high_20d_pct/upper_shadow_pct/ma_alignment/amount_yi 完整
+- 真实 7122 只行情 + 板块指数 K 线 全部 47/50 成功拉取
+
+已知 trade-off (下个 commit 优化):
+- 全市场兜底时 6 个板块 stocks 出现重复 (主词匹配失败的板块)
+  → 需给 factor_engine 加「主词匹配 vs 全市场」标签
+- discover 全链路 5 分钟, 6 板块 × 30 候选股 history 拉取是瓶颈
+  → 复用 v4.4.1 的 /discover 10min 缓存已生效, 重复点击秒回
+- 换手率改用 RVOL 1.5-3.5 替代 (无流通股本时更可靠)
