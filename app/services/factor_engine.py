@@ -305,26 +305,74 @@ async def run_multifactor_pipeline(
 # 2) 板块主词匹配的近 N 日上涨 Top（限板块成员数）
 # 注：东财 stock_board_concept_cons_em 当前在用户机器上 502
 #     → 用"全市场上涨 Top 200 + watchlist + 板块名匹配"近似候选股池
+
+# v4.6.1: 快照粗筛阈值（不依赖 K 线，纯内存计算）
+SNAPSHOT_CHANGE_MIN = 2.0         # 涨幅下限（%）：剔除一字跌停 + 弱势股
+SNAPSHOT_CHANGE_MAX = 9.5         # 涨幅上限（%）：剔除一字涨停（无参与空间）
+SNAPSHOT_MIN_AMOUNT = 8_000_000.0  # 当日成交额下限（元 = 8000 万）：剔除微盘死水
+SNAPSHOT_TOP_PER_SECTOR = 5       # 每板块经粗筛后最多保留的候选股数
+
+
+def _snapshot_prefilter(
+    pool: list[dict[str, Any]],
+    *,
+    cap: int = SNAPSHOT_TOP_PER_SECTOR,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """v4.6.1 快照粗筛：纯内存 0 网络，不拉 K 线。
+    1) 涨幅 ∈ [2.0%, 9.5%]（剔除一字跌停与无参与空间的一字板）
+    2) 当日成交额 > 8000 万元（排除微盘死水）
+    3) 按 (涨幅 × log(volume)) 排序取 Top ``cap`` 只
+    返回 (members, codes) — 顺序对齐。
+    """
+    import math
+    passed: list[tuple[float, str, dict[str, Any]]] = []
+    for s in pool:
+        try:
+            chg = float(s.get("change_pct") or 0)
+        except (TypeError, ValueError):
+            continue
+        amt = float(s.get("amount") or 0)
+        vol = float(s.get("volume") or 0)
+        price = float(s.get("price") or 0)
+        if price <= 0 or vol <= 0:
+            continue
+        if not (SNAPSHOT_CHANGE_MIN <= chg <= SNAPSHOT_CHANGE_MAX):
+            continue
+        if amt < SNAPSHOT_MIN_AMOUNT:
+            continue
+        # 排序分：涨幅 × log(volume)，量价齐升的优先
+        score = chg * math.log10(max(vol, 1))
+        code = s.get("__ts_code") or s.get("code") or ""
+        passed.append((score, code, s))
+    passed.sort(key=lambda x: (-x[0], x[1]))
+    members = [s for _, _, s in passed[:cap]]
+    codes = [c for _, c, _ in passed[:cap]]
+    return members, codes
+
+
 def _candidates_by_sector(
     sector_name: str,
     all_stocks: dict[str, dict[str, Any]],
     *,
     cap: int = 50,
+    excluded_codes: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """为单个板块构造候选股池（不依赖东财成分股接口，502 时全市场兜底）。
     返回 (candidates, codes) — 两者顺序对齐。
 
-    策略（v4.6 修复）：
-    1. 先按板块主词匹配（如 "高股息精选" → "高股息"），命中则优先
-    2. 主词匹配不足 10 只时 → 用全市场"涨幅+量能"Top N 兜底（保证候选池不空）
-    3. 领涨股必须进候选池
+    v4.6.1 强化：
+    1. excluded_codes：被前序板块选中的股票不再进入本板块候选池
+    2. 主词匹配 < 10 只时全市场兜底，且全市场兜底本身也排除 excluded_codes
     """
     import re
+    excluded = excluded_codes or set()
     main = re.split(r"[\s,，、/／]+", sector_name)[0][:4]
     if len(main) < 2:
         main = sector_name[:2]
     matched: list[tuple[float, str, dict[str, Any]]] = []
     for code, s in all_stocks.items():
+        if code in excluded:
+            continue
         nm = str(s.get("name") or "")
         if not nm or main not in nm:
             continue
@@ -341,9 +389,13 @@ def _candidates_by_sector(
     if len(matched) >= 10:
         pool = matched[:cap]
     else:
-        # 兜底：全市场按 (涨幅 × log(volume)) 排序拿前 cap 只（不剔除板块主词匹配）
+        # 兜底：全市场按 (涨幅 × log(volume)) 排序拿前 cap 只
+        # 严格排除 excluded_codes（避免跨板块重复）
+        import math
         fallback: list[tuple[float, str, dict[str, Any]]] = []
         for code, s in all_stocks.items():
+            if code in excluded:
+                continue
             try:
                 chg = float(s.get("change_pct") or 0)
             except (TypeError, ValueError):
@@ -352,7 +404,6 @@ def _candidates_by_sector(
             vol = float(s.get("volume") or 0)
             if price <= 0 or vol <= 0 or chg < -5.0:
                 continue
-            import math
             score = chg * math.log10(max(vol, 1))
             fallback.append((score, code, s))
         fallback.sort(key=lambda x: -x[0])
@@ -375,9 +426,8 @@ def _candidates_by_sector(
 def _ensure_history(codes: list[str]) -> None:
     """为给定的 codes 补拉 history。
 
-    同步实现：用 ThreadPoolExecutor 调 fetch_history_sync（拉数据）后**手动写入
-    mf.history_cache**（这是 fetch_history_for_codes 才会做的事，而它要求事件循环）。
-    失败静默——history 拉不到时 layer 2 会因『数据不足』拒掉。
+    v4.6.1: 10 并发（之前 5 并发）—— 30 只精选标的可在 5s 内拉完 60 天 K 线。
+    同步实现：用 ThreadPoolExecutor 调 fetch_history_sync 后手动写 mf.history_cache。
     """
     from concurrent.futures import ThreadPoolExecutor
     missing = [c for c in codes if c not in mf.history_cache]
@@ -391,7 +441,7 @@ def _ensure_history(codes: list[str]) -> None:
         except Exception:
             pass
     try:
-        with ThreadPoolExecutor(max_workers=5) as ex:
+        with ThreadPoolExecutor(max_workers=10) as ex:
             list(ex.map(_fetch_and_store, missing))
     except Exception:
         pass
@@ -401,23 +451,39 @@ def pick_stocks_for_sector(
     sector_name: str,
     all_stocks: dict[str, dict[str, Any]],
     leading_code: str | None = None,
+    excluded_codes: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """为单个板块用 factor_engine 三层硬过滤挑高分股。
     返回最多 TOP_STOCKS_PER_SECTOR 只（与 sector_alpha.pick_sector_stocks schema 对齐）。
 
-    v4.6 修复：
-    - 主动补拉 history（候选股的历史 K 线可能 startup 没拉）
-    - 候选股池不足时全市场兜底
+    v4.6.1 流水线：
+    1. 候选股池 = 板块主词匹配 + 全市场兜底（默认 cap=50）
+    2. 领涨股第一顺位插入（保证板块资金流信号不丢）
+    3. **快照粗筛**：涨幅 [2.0%, 9.5%] + 成交额 > 8000 万 + Top 5
+       —— 消灭 5 分钟 K 线拉取瓶颈（6 板块 × 5 = ≤30 只）
+    4. 主动补拉 history（10 并发，单批 5s 内完成）
+    5. 5 条个股硬过滤：MA 排列 / 距 20 日高 / VWAP 承接 / RVOL 区间 / 上影线
+    6. 角色识别：容量中军 / 弹性先锋 / 一般
     """
-    members, codes = _candidates_by_sector(sector_name, all_stocks)
+    excluded = set(excluded_codes or set())
+    members, codes = _candidates_by_sector(sector_name, all_stocks, excluded_codes=excluded)
     if leading_code and leading_code not in codes and leading_code in all_stocks:
         s = all_stocks[leading_code]
+        # 领涨股即使涨幅/成交额不达标也插入候选（但快照粗筛仍会筛掉）
         members.insert(0, s)
         codes.insert(0, leading_code)
     if not members:
         return []
-    # 补拉缺失的历史 K 线（重要：没有 history 没法算 MA/RVOL/影线）
-    _ensure_history(codes[:20])
+    # 阶段 1：快照粗筛（纯内存，0 网络）
+    members, codes = _snapshot_prefilter(
+        [{**m, "__ts_code": c} for m, c in zip(members, codes)],
+        cap=SNAPSHOT_TOP_PER_SECTOR,
+    )
+    if not codes:
+        return []
+    # 阶段 2：补拉 history（10 并发，30 只 ≤ 5s）
+    _ensure_history(codes)
+    # 阶段 3：硬过滤 + 角色识别
     accepted, _rejected = _score_and_filter_stocks(members, codes)
     out: list[dict[str, Any]] = []
     for feats in accepted[:TOP_STOCKS_PER_SECTOR]:

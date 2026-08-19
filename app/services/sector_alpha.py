@@ -557,14 +557,16 @@ def pick_sector_stocks(
     sector: dict[str, Any],
     all_stocks: dict[str, dict[str, Any]],
     news_hits: list[dict[str, Any]],
+    selected_codes: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """v4.6: 板块 → 代表股由 factor_engine 三层硬过滤挑选，替代 v4.4 的
     "领涨股 1 只 + 板块主词温和涨 1 只"启发式。
 
-    调用 factor_engine.pick_stocks_for_sector 走完整流水线：
-    - 候选股池 = 板块主词匹配全市场上涨 Top 50 + 领涨股
-    - 5 条个股硬过滤：MA 排列 / 距 20 日高 / VWAP 承接 / RVOL 区间 / 上影线
-    - 角色识别：容量中军 / 弹性先锋 / 一般
+    v4.6.1 强化：
+    - 跨板块去重：selected_codes 是前序板块已选中的股票代码集合；
+      后续板块在 factor_engine.pick_stocks_for_sector 内部 skip 这些 code
+    - 快照粗筛后只拉 ≤5 只候选股的 K 线（10 并发，5s 内完成）
+    - 领涨股第一顺位插入（保证板块资金流信号不丢）
     """
     from app.services import factor_engine
     ff = sector.get("fund_flow") or {}
@@ -585,6 +587,7 @@ def pick_sector_stocks(
             sector_name=sector["name"],
             all_stocks=all_stocks,
             leading_code=lead_code,
+            excluded_codes=selected_codes,
         )
     except Exception as e:
         logger.warning("pick_stocks_for_sector(%s) failed: %r, fallback empty", sector.get("name"), e)
@@ -620,6 +623,8 @@ async def build_sector_candidates(
     rejected: dict[str, int] = {}
     scored: list[tuple[int, dict[str, Any]]] = []
     index_ready = 0
+    # v4.6.1: 跨板块去重 — 前序板块入选的股票，后续板块强制跳过
+    selected_codes: set[str] = set()
     for _rank, sector in prescreen:
         name = sector["name"]
         records = indexes.get(name) or []
@@ -637,10 +642,16 @@ async def build_sector_candidates(
         if score < 45:
             rejected["score_low"] = rejected.get("score_low", 0) + 1
             continue
-        stocks = pick_sector_stocks(sector, all_stocks, news_hits)
+        stocks = pick_sector_stocks(sector, all_stocks, news_hits, selected_codes=selected_codes)
         if not stocks:
             rejected["no_stock"] = rejected.get("no_stock", 0) + 1
             continue
+
+        # 把本板块入选的 code 加入跨板块去重集合
+        for st in stocks:
+            sc = st.get("code")
+            if sc:
+                selected_codes.add(sc)
 
         ff = sector.get("fund_flow") or {}
         scored.append((score, {

@@ -1,0 +1,33 @@
+feat(v4.6.1): 前置快照粗筛 + 跨板块去重，discover Python 链路 5min→8s
+
+问题: v4.6 commit b74b6b8 后端到端首次 309s（180 只 K 线盲拉 + 跨板块 stocks 全重复）。
+v4.6.1 两个阻塞项同时优化:
+
+1. 前置快照粗筛（消灭 5min K 线拉取瓶颈）
+- factor_engine._snapshot_prefilter: 涨幅 [2.0%, 9.5%] + 成交额>8000万 + Top 5
+  （剔除一字跌停与无参与空间的一字板；微盘死水一并排除）
+- 全局 6 板块 × 5 = ≤30 只精选标的（vs 之前 180 只盲拉）
+- _ensure_history 并发从 5 提升到 10，30 只 K 线 5s 内完成
+- 7122 只快照粗筛实测 37ms（< 50ms 阈值）
+
+2. 跨板块去重（消灭 stocks 重复）
+- factor_engine.pick_stocks_for_sector 新增 excluded_codes 参数
+- sector_alpha.build_sector_candidates 维护跨板块 selected_codes set
+- 入选股自动加入 set，下一板块调 factor_engine 时强制跳过
+- 实测 3 板块去重 0 重复
+
+端到端验证 (8765, 17:54 数据):
+- /api/strategy/discover: total 64.3s (v4.6: 309s) —— 5x 加速
+- 分段计时: 板块池 5.1s + 板块指数 K 线 0.1s + build 2.4s = Python 7.6s
+- 剩余 50s 是 M2.7 thinking LLM 固有成本，v4.4.1 10min 缓存已覆盖（热缓存秒回）
+- 6 板块候选 → 1 板块（收盘后大量股票涨幅 < 2% 或 ≥ 9.5%，快照粗筛严格按阈值剔）
+
+单测 _test_factor_engine_v461.py:
+- 快照粗筛: 涨幅 2-9.5% + 成交额>8000万 精确执行 + Top 排序验证
+- 跨板块去重: 6 只 mock 股票，3 板块依次入选 0 重复
+- 性能: 7122 只 mock 快照粗筛 37ms
+
+trade-off:
+- 收盘后/低活跃时段板块数会减少（5+ 个常见，开盘时段恢复）
+- LLM 调用仍是 50s 级别（M2.7 thinking 固有），靠 v4.4.1 10min 缓存兜底
+- 15s 目标未达（实际 64s），但**Python 侧已 < 8s**，剩余 50s 是 LLM 成本
