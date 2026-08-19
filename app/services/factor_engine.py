@@ -37,9 +37,11 @@ TOP_SECTORS = 3                  # 最终入选板块数
 #      用 RVOL（相对量能）替代作为量能主约束；turnover_proxy_pct 字段保留软参考。
 RVOL_MIN = 1.5                   # 相对量能下限（RVOL = 今日量 / 5 日均量）
 RVOL_MAX = 3.5
-UPPER_SHADOW_MAX = 25.0          # 上影线占比上限（%）（high - max(open,close)） / (high - low)
-NEAR_HIGH_20D_PCT = 5.0          # 距离 20 日最高价上限（%）（越接近平台高点越好）
-TOP_STOCKS_PER_SECTOR = 2        # 每板块入选个股数
+UPPER_SHADOW_MAX = 25.0          # 上影线占比上限（%）（high - max(open,close)） / (high - low）
+# v4.6.1.2: 放宽到 ±10%，接受更深回撤位+超跌反弹股
+# 普跌日（>50% 股票 chg<-5%）下，原 ±5% 几乎无股能过 → 板块数 0
+NEAR_HIGH_20D_PCT = 10.0         # 距离 20 日最高价上限（%）（放宽后：仍拒绝追涨/追高，但接受深度回撤）
+TOP_STOCKS_PER_SECTOR = 2        # 每板块入选个股数（v4.6.1.2 允许 1 只：accepted 列表非空即可）
 
 # Layer 3 角色
 MID_CAP_AMOUNT = 10.0            # 容量中军：当日成交额下限（亿）
