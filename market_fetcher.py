@@ -659,10 +659,15 @@ def get_history(code: str) -> dict[str, Any]:
 async def ensure_history_for_codes(
     codes: list[str],
     *,
-    min_records: int = 60,
+    min_records: int = 25,
     concurrency: int = 4,
 ) -> dict[str, dict[str, Any]]:
-    """Return cached history and fetch only symbols lacking a usable K-line window."""
+    """Return cached history and fetch only symbols lacking a usable K-line window.
+
+    v4.6.2 修复: 默认 min_records 从 60 → 25（实盘 60 自然日 ≈ 42 交易日，但 HISTORY_FETCH_DAYS=60
+    是自然日；返回的 data 实际只有 ~42 条。原 min_records=60 永远不满足 → 永远会拉
+    → 浪费时间。25 是 MA20 所需的最低条数）。
+    """
     unique_codes = list(dict.fromkeys(codes))
     missing = [
         code for code in unique_codes

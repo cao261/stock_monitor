@@ -1,0 +1,78 @@
+refactor(v4.6.2): 整体代码质量优化与 11 项运行时 bug 修复
+
+通读整个项目（11 个核心模块 ~4500 行）发现的问题分类修复：
+
+**A. 真实运行时 BUG（3 项）**
+
+1. strategy.py daily-summary 浮盈亏分类盲区
+   - 问题: pnl == 0 时被 if/elif 跳过，不归入 winners/losers
+   - 影响: 前端 total 计数与 winners+losers+no_position 之和不一致
+   - 修法: `if pnl >= 0: pnl_winners.append(base)`（保本持仓也合规）
+
+2. market_fetcher.ensure_history_for_codes 默认 min_records=60
+   - 问题: HISTORY_FETCH_DAYS=60 是自然日，实际 data 只有 ~42 条；min_records=60 永远不满足
+   - 影响: 永远触发 re-fetch，浪费带宽
+   - 修法: 默认 25（MA20 所需最低条数）
+
+3. llm.py DISCOVER_SYSTEM_PROMPT 双重定义死代码
+   - 问题: v4.1 旧 prompt 残留，被 v4.4 新定义覆盖
+   - 修法: 删旧定义，留注释说明 fallback 路径仍需此 prompt
+
+**B. 并发安全 (1 项)**
+
+4. strategy.py /discover 端点无并发锁
+   - 问题: 两个请求同时 cache miss 时重复跑 60s+ LLM 链路
+   - 修法: 加 asyncio.Lock + 锁内二次检查 cache
+
+**C. 错误处理改进 (3 项)**
+
+5. factor_engine._ensure_history 静默 except: pass
+   - 问题: K线拉取失败无任何日志，无法定位板块无股票入选原因
+   - 修法: 失败时 logger.warning + 统计成功/失败条数
+
+6. sector_alpha.pick_sector_stocks logger.warning → logger.exception
+   - 问题: 异常只打印消息不打印 traceback
+   - 修法: 改 logger.exception 保留完整堆栈
+
+7. llm.py think 块剥离 (注释更新)
+   - re.compile 已是 DOTALL + IGNORECASE，多个 think 块已能剥离
+   - 注释明确说明"v4.6.2 修复: 全局剥离"
+
+**D. 死代码与过时文档 (4 项)**
+
+8. factor_engine._stock_features.low_20d
+   - 死代码：计算后从未使用
+   - 修法: 删除计算
+
+9. factor_engine._score_and_filter_stocks 返回类型注解
+   - 之前 `-> list` + `# type: ignore[return-value]`，与实际 `(accepted, rejected)` tuple 不符
+   - 修法: 改正确注解 `-> tuple[list, list]`，去掉 type: ignore
+
+10. factor_engine._snapshot_prefilter docstring
+    - 文档还写 [2.0%, 9.5%] + 8000万（v4.6.1.1 已放宽）
+    - 修法: 同步 docstring 到 v4.6.1.1 实际值
+
+11. factor_engine.pick_stocks_for_sector docstring
+    - 文档还写 [2.0%, 9.5%] + 8000万 + 距 20 日高 ±5%
+    - 修法: 同步到 v4.6.1.1/v4.6.1.2 实际值 ([0%, 9.5%] + 5000万 + 距 20 日高 ±10%)
+
+**端到端验证 (8765, 22:18 数据)**
+
+- daily-summary: status=200, 情绪 84.71, 5171 涨 / 1769 跌 / 132 涨停
+- watchlist quotes: status=200, sh589130 行情正确
+- /api/strategy/discover: status=200, engine_level=sector, 2 个板块
+  （云办公 56 PASS + 冰雪产业 55 PASS）—— 板块数比昨天 1 个多，
+  验证 v4.6.1.1 放宽阈值 + 跨板块去重都生效
+
+**单测**
+
+- _test_factor_engine.py: 14 断言全过
+- _test_factor_engine_v461.py: 3 断言全过
+- U+FFFD 扫描: 0 (全部 8 个核心文件)
+
+修改文件:
+- app/routers/strategy.py (并发锁 + 浮盈亏分类 + min_records)
+- app/services/factor_engine.py (错误处理 + 死代码 + 文档同步)
+- app/services/llm.py (DISCOVER_SYSTEM_PROMPT 死代码清理)
+- app/services/sector_alpha.py (logger.exception)
+- market_fetcher.py (min_records 默认值)

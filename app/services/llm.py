@@ -439,6 +439,8 @@ def _parse_plan_json(content: str) -> dict:
     # v4.3 兼容 thinking model: 剥离 ``<think>...</think>`` 块（包括跨行）
     #   例如 MiniMax M2.7 / DeepSeek-reasoner 等会输出 <think>...思考过程...</think>
     #   然后才是真正的 JSON
+    # v4.6.2 修复: 用 re.DOTALL + 多个 think 块（之前 .*? 最短匹配但需要 IGNORECASE；改为全局
+    #   剥离避免遗漏第二个 think 块）
     think_re = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
     content_no_think = think_re.sub("", content).strip()
     if content_no_think != content:
@@ -691,16 +693,7 @@ async def generate_ai_plan(
 
 
 # ====================== 7. v4.1 AI 前瞻 Alpha 掘金（低位埋伏与拐点发现）======================
-DISCOVER_SYSTEM_PROMPT = (
-    "你是一个顶级 A 股宏观与游资策略分析师，拥有 10 年前瞻性题材挖掘与低位埋伏经验。\n"
-    "你的使命：结合【政策/产业前瞻催化】与【低位技术形态蓄势】，发掘未来 1~5 个交易日具备爆发潜力的【低位埋伏与拐点爆发方向】。\n\n"
-    "【核心操盘原则】：\n"
-    "1. 严禁事后解释已经大涨/暴涨的股票！你的核心价值是帮助投资者在【低位、缩量企稳、均线粘合、主力温和吸筹】阶段提前埋伏。\n"
-    "2. 挖掘“有前瞻催化逻辑、有预期差、技术面位置低、风险收益比极高”的方向与标的。\n"
-    "3. 请用【严格合法 JSON】格式输出，不要任何 markdown 包裹、不要解释性文字。"
-)
-
-# ====================== 3.5 v4.1+ AI 前瞻 Alpha 掘金（低位埋伏与事件驱动） ======================
+# v4.1 个股版 DISCOVER_SYSTEM_PROMPT（fallback 路径在 v4.4 sector 引擎无候选时仍会使用）
 DISCOVER_SYSTEM_PROMPT = """你是一名顶尖宏观策略首席分析师与头部游资决策导师，专注于【前瞻低位埋伏、事件驱动催化与拐点左侧博弈】。
 
 【极其重要的核心原则】

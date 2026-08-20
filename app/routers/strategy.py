@@ -26,6 +26,10 @@ logger = logging.getLogger("strategy")
 # v4.4.1: /discover 结果缓存（LLM 全链路 150-280s，10 分钟内重复点击秒回）
 _DISCOVER_CACHE_TTL_SECONDS = 600
 _discover_cache: dict[str, dict] = {"ts": 0.0, "data": None}
+# v4.6.2: 并发锁 — 防止两个请求同时 cache miss 重复跑 60s+ 完整链路
+# （之前无锁：用户双击 /discover 按钮会触发 2 个并行 LLM 调用）
+import asyncio
+_discover_lock = asyncio.Lock()
 
 
 def _discover_cache_hit() -> dict | None:
@@ -172,12 +176,13 @@ def get_daily_summary(db: Session = Depends(get_db)) -> dict:
         #   1. 没持仓（cost/position 缺失）        → no_position
         #   2. 有持仓但暂无价格（pnl 缺失）          → no_position（带 base）
         #   3. 有持仓有价格（pnl 有值）                → pnl_winners / pnl_losers
+        # v4.6.2 修复: pnl == 0 时归入 winners（保本持仓也是合规状态，不应被前端忽略）
         if cost is None or position is None or pnl is None:
             no_position.append(base)
         else:
-            if pnl > 0:
+            if pnl >= 0:
                 pnl_winners.append(base)
-            elif pnl < 0:
+            if pnl < 0:
                 pnl_losers.append(base)
             pnl_total += pnl
             # 持仓市值（用于算总成本 / 总市值）
@@ -376,67 +381,74 @@ async def discover() -> dict:
     if cached is not None:
         return cached
 
-    # ===== v4.4 主路径：板块级引擎 =====
-    from app.services import sector_alpha
-    built = await sector_alpha.build_sector_candidates(all_stocks, news)
-    if built["sectors"]:
-        result = await llm.generate_sector_discover(built["sectors"], news)
-        payload = {
+    # v4.6.2: 并发锁——避免两个请求同时 cache miss 重复跑 60s 完整链路
+    async with _discover_lock:
+        # 拿到锁后再次检查 cache（其他请求可能已填充）
+        cached = _discover_cache_hit()
+        if cached is not None:
+            return cached
+
+        # ===== v4.4 主路径：板块级引擎 =====
+        from app.services import sector_alpha
+        built = await sector_alpha.build_sector_candidates(all_stocks, news)
+        if built["sectors"]:
+            result = await llm.generate_sector_discover(built["sectors"], news)
+            payload = {
+                **result,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "meta": {
+                    "engine_level": "sector",
+                    "pool_size": built["pool_size"],
+                    "prescreened": built["prescreened"],
+                    "index_ready": built["index_ready"],
+                    "rejected": built["rejected"],
+                    "candidate_count": len(built["sectors"]),
+                    "news_count": len(news),
+                    "news_source": news_cache.get("source"),
+                    "news_fetched_at": news_cache.get("fetched_at"),
+                    "news_error": news_cache.get("error"),
+                },
+            }
+            _discover_cache["ts"] = datetime.now().timestamp()
+            _discover_cache["data"] = payload
+            return payload
+
+        # ===== v4.1 降级路径：个股引擎（板块数据不可用/无候选时） =====
+        from app.services.alpha_discovery import build_quantitative_candidates, preselect_codes
+        candidate_codes = preselect_codes(all_stocks)
+        histories = await mf.ensure_history_for_codes(candidate_codes, min_records=25, concurrency=4)
+        candidates, rejected = build_quantitative_candidates(all_stocks, histories, target_count=5)
+        if not candidates:
+            return {
+                "discoveries": [],
+                "engine_type": "quantitative",
+                "engine_name": "⚡ 量化低位筛选",
+                "engine_desc": "板块引擎与个股引擎均未产出满足左侧纪律的候选。",
+                "model": None,
+                "generated_at": datetime.now().isoformat(timespec="seconds"),
+                "meta": {
+                    "engine_level": "fallback_stock",
+                    "preselected_count": len(candidate_codes),
+                    "rejected": rejected,
+                    "degraded_reason": "no_sector_candidates",
+                },
+            }
+
+        result = await llm.generate_discover(
+            candidates=candidates,
+            news=news,
+        )
+        return {
             **result,
             "generated_at": datetime.now().isoformat(timespec="seconds"),
             "meta": {
-                "engine_level": "sector",
-                "pool_size": built["pool_size"],
-                "prescreened": built["prescreened"],
-                "index_ready": built["index_ready"],
-                "rejected": built["rejected"],
-                "candidate_count": len(built["sectors"]),
+                "engine_level": "fallback_stock",
+                "preselected_count": len(candidate_codes),
+                "candidate_count": len(candidates),
+                "rejected": rejected,
                 "news_count": len(news),
                 "news_source": news_cache.get("source"),
                 "news_fetched_at": news_cache.get("fetched_at"),
                 "news_error": news_cache.get("error"),
             },
         }
-        _discover_cache["ts"] = datetime.now().timestamp()
-        _discover_cache["data"] = payload
-        return payload
-
-    # ===== v4.1 降级路径：个股引擎（板块数据不可用/无候选时） =====
-    from app.services.alpha_discovery import build_quantitative_candidates, preselect_codes
-    candidate_codes = preselect_codes(all_stocks)
-    histories = await mf.ensure_history_for_codes(candidate_codes, min_records=60, concurrency=4)
-    candidates, rejected = build_quantitative_candidates(all_stocks, histories, target_count=5)
-    if not candidates:
-        return {
-            "discoveries": [],
-            "engine_type": "quantitative",
-            "engine_name": "⚡ 量化低位筛选",
-            "engine_desc": "板块引擎与个股引擎均未产出满足左侧纪律的候选。",
-            "model": None,
-            "generated_at": datetime.now().isoformat(timespec="seconds"),
-            "meta": {
-                "engine_level": "fallback_stock",
-                "preselected_count": len(candidate_codes),
-                "rejected": rejected,
-                "degraded_reason": "no_sector_candidates",
-            },
-        }
-
-    result = await llm.generate_discover(
-        candidates=candidates,
-        news=news,
-    )
-    return {
-        **result,
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "meta": {
-            "engine_level": "fallback_stock",
-            "preselected_count": len(candidate_codes),
-            "candidate_count": len(candidates),
-            "rejected": rejected,
-            "news_count": len(news),
-            "news_source": news_cache.get("source"),
-            "news_fetched_at": news_cache.get("fetched_at"),
-            "news_error": news_cache.get("error"),
-        },
-    }

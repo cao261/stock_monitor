@@ -148,7 +148,7 @@ def _stock_features(
     ma10 = _ma(closes, 10)
     ma20 = _ma(closes, 20)
     high_20d = max(highs[-20:]) if len(highs) >= 20 else max(highs)
-    low_20d = min(lows[-20:]) if len(lows) >= 20 else min(lows)
+    # v4.6.2: low_20d 不再使用（曾经预留给 ATR 动态支撑），删除避免死代码告警
     avg_vol_5d = sum(volumes[-5:]) / 5 if len(volumes) >= 5 else 0
     # 估算"分时均价"（VWAP 替代）：amount / volume；没有分钟数据就用日 K 近似当日均价
     vwap_proxy = (amt / vol) if vol > 0 else price
@@ -167,7 +167,7 @@ def _stock_features(
         "ma5": round(ma5, 4) if ma5 else None,
         "ma10": round(ma10, 4) if ma10 else None,
         "ma20": round(ma20, 4) if ma20 else None,
-        "ma_alignment": (ma5 and ma10 and ma20 and ma5 > ma10 > ma20),
+        "ma_alignment": bool(ma5 and ma10 and ma20 and ma5 > ma10 > ma20),
         "high_20d": round(high_20d, 4),
         "dist_high_20d_pct": dist_high_20d_pct,
         "vwap_proxy": round(vwap_proxy, 4),
@@ -223,8 +223,14 @@ def _build_candidate_sectors(
 def _score_and_filter_stocks(
     members: list[dict[str, Any]],
     ts_codes: list[str],
-) -> list[dict[str, Any]]:
-    """从板块成分股里挑出硬过滤通过的 Top N。"""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """从板块成分股里挑出硬过滤通过的 Top N。
+
+    Returns:
+        (accepted, rejected):
+        - accepted: 通过个股层 5 条硬过滤 + 角色识别的全部股票（不在此处截短 Top N）
+        - rejected: [{code, name, why}, ...] 拒因列表
+    """
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for code, m in zip(ts_codes, members):
@@ -244,7 +250,7 @@ def _score_and_filter_stocks(
         feats["change_pct"] = m.get("change_pct") or snap.get("change_pct")
         accepted.append(feats)
     accepted.sort(key=lambda x: (x.get("rvol", 0), x.get("amount_yi", 0)), reverse=True)
-    return accepted[:TOP_STOCKS_PER_SECTOR], rejected  # type: ignore[return-value]
+    return accepted, rejected
 
 
 # ====================== 顶层入口（供 routers/strategy.py 调用）======================
@@ -321,9 +327,9 @@ def _snapshot_prefilter(
     *,
     cap: int = SNAPSHOT_TOP_PER_SECTOR,
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """v4.6.1 快照粗筛：纯内存 0 网络，不拉 K 线。
-    1) 涨幅 ∈ [2.0%, 9.5%]（剔除一字跌停与无参与空间的一字板）
-    2) 当日成交额 > 8000 万元（排除微盘死水）
+    """v4.6.1.1 快照粗筛：纯内存 0 网络，不拉 K 线。
+    1) 涨幅 ∈ [0%, 9.5%]（v4.6.1.1 放宽：剔除一字跌停 + 一字涨停；接受小幅翻红股应对普跌日）
+    2) 当日成交额 >= 5000 万元（v4.6.1.1 放宽：v4.6.1 是 8000 万）
     3) 按 (涨幅 × log(volume)) 排序取 Top ``cap`` 只
     返回 (members, codes) — 顺序对齐。
     """
@@ -431,23 +437,37 @@ def _ensure_history(codes: list[str]) -> None:
 
     v4.6.1: 10 并发（之前 5 并发）—— 30 只精选标的可在 5s 内拉完 60 天 K 线。
     同步实现：用 ThreadPoolExecutor 调 fetch_history_sync 后手动写 mf.history_cache。
+
+    v4.6.2 修复: 失败时打 warn（之前静默 pass，会让板块无股票入选但无任何日志
+    可定位原因）。
     """
     from concurrent.futures import ThreadPoolExecutor
     missing = [c for c in codes if c not in mf.history_cache]
     if not missing:
         return
-    def _fetch_and_store(code: str) -> None:
+
+    def _fetch_and_store(code: str) -> tuple[str, bool]:
         try:
             data = mf.fetch_history_sync(code)
             if data.get("data"):
                 mf.history_cache[code] = data
-        except Exception:
-            pass
+                return code, True
+            return code, False
+        except Exception as exc:
+            logger.warning("_ensure_history(%s) failed: %r", code, exc)
+            return code, False
+
     try:
         with ThreadPoolExecutor(max_workers=10) as ex:
-            list(ex.map(_fetch_and_store, missing))
-    except Exception:
-        pass
+            results = list(ex.map(_fetch_and_store, missing))
+        ok = sum(1 for _, success in results if success)
+        if ok < len(missing):
+            logger.warning(
+                "_ensure_history: %d/%d codes K线拉取失败，板块选股池会缩小",
+                len(missing) - ok, len(missing),
+            )
+    except Exception as exc:
+        logger.exception("_ensure_history 整体异常: %r", exc)
 
 
 def pick_stocks_for_sector(
@@ -459,13 +479,13 @@ def pick_stocks_for_sector(
     """为单个板块用 factor_engine 三层硬过滤挑高分股。
     返回最多 TOP_STOCKS_PER_SECTOR 只（与 sector_alpha.pick_sector_stocks schema 对齐）。
 
-    v4.6.1 流水线：
+    v4.6.1.1 流水线：
     1. 候选股池 = 板块主词匹配 + 全市场兜底（默认 cap=50）
     2. 领涨股第一顺位插入（保证板块资金流信号不丢）
-    3. **快照粗筛**：涨幅 [2.0%, 9.5%] + 成交额 > 8000 万 + Top 5
+    3. **快照粗筛**：涨幅 [0%, 9.5%] + 成交额 >= 5000 万 + Top 5
        —— 消灭 5 分钟 K 线拉取瓶颈（6 板块 × 5 = ≤30 只）
     4. 主动补拉 history（10 并发，单批 5s 内完成）
-    5. 5 条个股硬过滤：MA 排列 / 距 20 日高 / VWAP 承接 / RVOL 区间 / 上影线
+    5. 5 条个股硬过滤：MA 排列 / 距 20 日高 ±10% / VWAP 承接 / RVOL [1.5, 3.5] / 上影线 <25%
     6. 角色识别：容量中军 / 弹性先锋 / 一般
     """
     excluded = set(excluded_codes or set())

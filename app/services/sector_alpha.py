@@ -590,7 +590,8 @@ def pick_sector_stocks(
             excluded_codes=selected_codes,
         )
     except Exception as e:
-        logger.warning("pick_stocks_for_sector(%s) failed: %r, fallback empty", sector.get("name"), e)
+        # v4.6.2 修复: 改用 logger.exception 保留 traceback（之前 logger.warning 只打印消息）
+        logger.exception("pick_stocks_for_sector(%s) failed, fallback empty", sector.get("name"))
         return []
 
 
