@@ -44,6 +44,15 @@ LLM_ENABLED: bool = bool(LLM_API_KEY)
 # v4.3 第二次调整: 120 -> 180, 实测 M2.7 思考 + JSON 完整响应需 113s, 120s + 重试会触发超时
 LLM_TIMEOUT_SECONDS: float = float(os.environ.get("LLM_TIMEOUT_SECONDS", "180"))
 
+# v4.6.3: LLM 简洁模式（降耗提速）。开启后 max_tokens 收紧 + system prompt 加简洁约束。
+# 目标: 将 discover 端到端 < 15s（之前 M2.7 thinking 模式 50-80s 链路降不下来）
+LLM_CONCISE_MODE: bool = os.environ.get("LLM_CONCISE_MODE", "1") == "1"
+# 简洁模式下的 max_tokens（之前 M2.7 thinking 块能占 1500+ token，2000-2500 给 thinking
+# 模型留余量。新值 2000：thinking 块被限制在 ~1000 token，主体 JSON 留 ~1000 token）
+LLM_CONCISE_MAX_TOKENS: int = int(os.environ.get("LLM_CONCISE_MAX_TOKENS", "2000"))
+# 普通模式（CONCISE_MODE=0）的 max_tokens（保持旧值以兼容旧配置）
+LLM_NORMAL_MAX_TOKENS: int = int(os.environ.get("LLM_NORMAL_MAX_TOKENS", "2500"))
+
 # Alpha 核验可配置双模型。旧 LLM_* 配置仍作为 MiniMax（主模型）的兼容回退。
 MINIMAX_API_KEY: str = os.environ.get("MINIMAX_API_KEY", LLM_API_KEY).strip()
 MINIMAX_BASE_URL: str = os.environ.get("MINIMAX_BASE_URL", LLM_BASE_URL).strip()

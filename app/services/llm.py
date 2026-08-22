@@ -358,8 +358,19 @@ async def _call_llm_with_retry(
             if limiter:
                 await limiter.acquire()
                 async with limiter._semaphore:
-                    return await client.chat.completions.create(**kwargs)
-            return await client.chat.completions.create(**kwargs)
+                    resp = await client.chat.completions.create(**kwargs)
+            else:
+                resp = await client.chat.completions.create(**kwargs)
+            # v4.6.3: 截断自动重试 —— finish_reason=length 时 max_tokens 不够
+            # 自动 2x 重试（仅 1 次），避免简洁模式下 M2.7 thinking 块 + JSON 主体 1500+ token 被截
+            if (getattr(resp.choices[0], "finish_reason", None) == "length"
+                    and kwargs["max_tokens"] < 8000):
+                old_max = kwargs["max_tokens"]
+                kwargs["max_tokens"] = min(8000, kwargs["max_tokens"] * 2)
+                logger.warning("LLM output truncated at max_tokens=%d; retrying with %d",
+                               old_max, kwargs["max_tokens"])
+                continue
+            return resp
         except openai.RateLimitError as e:
             if attempt == max_retries:
                 raise
@@ -389,21 +400,32 @@ def _first_choice_text(resp) -> str:
     return (resp.choices[0].message.content or "").strip()
 
 
+def _resolve_max_tokens(caller_default: int) -> int:
+    """v4.6.3: 根据 LLM_CONCISE_MODE 解析最终 max_tokens。
+
+    简洁模式（默认开）：用 config.LLM_CONCISE_MAX_TOKENS（1200）
+    非简洁模式：用 config.LLM_NORMAL_MAX_TOKENS（2500）
+    caller_default 仍可作为"调用方推荐的默认值"传入（取 min 保险）。
+    """
+    cap = config.LLM_CONCISE_MAX_TOKENS if config.LLM_CONCISE_MODE else config.LLM_NORMAL_MAX_TOKENS
+    return min(caller_default, cap)
+
+
 async def generate_report(summary: dict) -> str:
     """调用 LLM 生成深度复盘报告（Markdown 字符串）。"""
     client = _get_client()
     messages = build_messages(summary)
     logger.info(
-        "calling LLM (report): model=%s base_url=%s messages=%d",
-        config.LLM_MODEL_NAME, config.LLM_BASE_URL, len(messages),
+        "calling LLM (report): model=%s base_url=%s messages=%d concise=%s",
+        config.LLM_MODEL_NAME, config.LLM_BASE_URL, len(messages), config.LLM_CONCISE_MODE,
     )
     resp = await _call_llm_with_retry(
         client=client,
         model=config.LLM_MODEL_NAME,
         messages=messages,
         temperature=0.7,
-        # v4.3: 1500 -> 2500, 给 thinking model 留余量
-        max_tokens=2500,
+        # v4.6.3: 简洁模式下降耗；非简洁模式沿用 2500
+        max_tokens=_resolve_max_tokens(2500),
     )
     return _first_choice_text(resp)
 
@@ -672,8 +694,8 @@ async def generate_ai_plan(
         model=config.LLM_MODEL_NAME,
         messages=messages,
         temperature=0.5,
-        # v4.3: 800 -> 2000, thinking model 留余量
-        max_tokens=2000,
+        # v4.6.3: 简洁模式下降耗；非简洁模式沿用 2000
+        max_tokens=_resolve_max_tokens(2000),
         response_format={"type": "json_object"},
     )
 
@@ -1450,7 +1472,10 @@ async def generate_discover(candidates: list[dict], news: list[dict]) -> dict:
             logger.info("calling discover verifier provider=%s model=%s candidates=%d", provider, model, len(discoveries))
             response = await _call_llm_with_retry(
                 _get_client(api_key, base_url), model, messages, temperature=0.2,
-                max_tokens=config.DISCOVER_MAX_TOKENS, response_format={"type": "json_object"}, limiter=limiter,
+                # v4.6.3: 简洁模式默认 1200；非简洁模式沿用 DISCOVER_MAX_TOKENS(2200)
+                max_tokens=_resolve_max_tokens(config.DISCOVER_MAX_TOKENS),
+                response_format={"type": "json_object"},
+                limiter=limiter,
             )
             if getattr(response.choices[0], "finish_reason", None) == "length":
                 raise RuntimeError("LLM verification output was truncated")
@@ -1501,6 +1526,11 @@ SECTOR_DISCOVER_SYSTEM_PROMPT = (
     "若有则调低 level + 增强 risk_warning；若无则给出 catalyst_window 与 break_trigger。\n"
     "6. v4.4 升级：你需要做【三层验证】(T1 消息面真实性 / T2 技术面操盘意图 / T3 跨维度一致性)，"
     "解决量化框架的 3 大盲区：假政策 / 假突破 / 虚假一致。\n"
+    # v4.6.3 提速约束：直接给 JSON，不要长篇思考
+    "7. **v4.6.3 简洁约束**：直接输出最终 JSON，禁止任何长篇思考或分析铺垫。"
+    "不要在 JSON 前写解释性文字、不要写『我分析了...』『让我看看...』这类元话语。"
+    "如果非 thinking 模式：直接 [system 约束] -> [user 数据] -> [assistant JSON]。"
+    "如果是 thinking 模式：think 块控制在 200 token 以内，主体 JSON 控制在 800 token 以内。\n"
     "请严格输出合法 JSON。"
 )
 
@@ -1865,8 +1895,9 @@ async def generate_sector_discover(
                     # 不用 response_format=json_object：MiniMax/M2.7 等 thinking 模型在该模式下
                     # 偶发只输出 <think> 思考块就 stop（平台侧不稳定）；自然输出 =
                     # <think> + ```json 块，_parse_plan_json 已兼容。
-                    # M2.7 支持 1M 上下文，max_tokens 放宽到 8192 防截断
-                    max_tokens=max(8192, config.DISCOVER_MAX_TOKENS),
+                    # v4.6.3: 简洁模式默认 1200（之前 8192 是给 thinking 块留余量但 50-80s
+                    #   链路太长），非简洁模式沿用 8192
+                    max_tokens=_resolve_max_tokens(max(8192, config.DISCOVER_MAX_TOKENS)),
                     limiter=limiter,
                 )
                 if getattr(response.choices[0], "finish_reason", None) == "length":
