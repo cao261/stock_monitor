@@ -45,6 +45,24 @@ SINA_HEADERS = {
     ),
 }
 
+# v2026-08-23 审计优化：aiohttp 连接池。7120 只 ETF 5s 轮询时连接复用，避免每次
+# 重建 TCP/TLS 连接。limit=50 防止 sina/腾讯/QoS 触发反爬。DNS 缓存 5min 减少解析。
+# 注意：aiohttp 3.14+ TCPConnector 需要 running event loop 才能构造（会在 __init__ 里
+# asyncio.get_running_loop()），所以延迟到首次使用才创建。
+_aiohttp_connector_instance: aiohttp.TCPConnector | None = None
+
+
+def _get_aiohttp_connector() -> aiohttp.TCPConnector:
+    """懒加载 aiohttp 连接池。必须从 async 上下文里调（aiohttp 3.14+ 要求）。"""
+    global _aiohttp_connector_instance
+    if _aiohttp_connector_instance is None:
+        _aiohttp_connector_instance = aiohttp.TCPConnector(
+            limit=50,
+            ttl_dns_cache=300,
+            enable_cleanup_closed=True,
+        )
+    return _aiohttp_connector_instance
+
 # 腾讯 K 线接口（用户环境里东方财富域名被屏蔽，用腾讯兜底）
 TENCENT_KLINE_URL = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 TENCENT_HEADERS = {
@@ -432,7 +450,7 @@ async def fetch_all_prices(
         async with sem:
             return await _fetch_batch(session, b)
 
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(connector=_get_aiohttp_connector()) as session:
         results = await asyncio.gather(
             *(_guarded(b) for b in batches),
             return_exceptions=True,
@@ -487,7 +505,7 @@ async def ensure_price_in_cache(code: str) -> dict[str, Any] | None:
     if not re.match(r"^(sh|sz|bj)\d{6}$", code):
         return None
     try:
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=_get_aiohttp_connector()) as session:
             result = await _fetch_batch(session, [code])
         return result.get(code) or all_stocks_cache.get(code)
     except Exception as e:

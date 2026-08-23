@@ -502,10 +502,11 @@ def execute_trade(
         db.commit()
     except Exception as e:
         db.rollback()
+        # v2026-08-23 审计修复：完整堆栈记日志，detail 用固定文案（避免 SQL 字段名/约束细节外泄）
         trade_logger.exception("trade write failed: %r", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"交易记录写入失败：{e}",
+            detail="交易记录写入失败，请稍后重试。详细错误见后端日志。",
         ) from e
     db.refresh(obj)
     db.refresh(log)
@@ -632,17 +633,18 @@ async def ai_plan(
         )
     except ValueError as e:
         # LLM 输出 JSON 缺关键字段
-        trade_logger.exception("ai-plan JSON parse failed for %s", obj.ts_code)
+        trade_logger.exception("ai-plan JSON parse failed for %s: %r", obj.ts_code, e)
+        # v2026-08-23 审计修复：detail 不直接返 e（避免 LLM 内部 prompt/响应结构外泄）
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI 规划解析失败：{e}",
+            detail="AI 规划解析失败（LLM 返回格式异常），请稍后重试。",
         ) from e
     except Exception as e:
         # 网络 / 限流 / 余额不足
-        trade_logger.exception("ai-plan LLM call failed for %s", obj.ts_code)
+        trade_logger.exception("ai-plan LLM call failed for %s: %r", obj.ts_code, e)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI 规划调用失败：{e}",
+            detail="AI 规划调用失败（网络/限流/余额），请稍后重试。",
         ) from e
 
     # ===== 4. 把"当前已设值"与"持仓画像"也带上，前端 Modal 做高保真展示 =====

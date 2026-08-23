@@ -118,6 +118,18 @@ function hasDetail(item) {
 
       <!-- 内容区 -->
       <div class="p-4 overflow-y-auto space-y-3.5 bg-[#0d1322] text-xs">
+        <!-- v2026-08-23 审计加：LLM 数据授权提示 -->
+        <div class="text-[11px] bg-amber-950/40 text-amber-200 border border-amber-800/60 rounded p-2.5 flex items-start gap-2">
+          <span class="text-base leading-none">⚠️</span>
+          <div class="flex-1 leading-relaxed">
+            <div class="font-semibold mb-0.5">数据已发送至第三方 LLM 服务</div>
+            <div class="text-amber-300/80">
+              本次挖掘调用模型 <span class="font-mono text-amber-200">{{ props.result?.model || '未知 LLM' }}</span>，
+              <strong>近期 7×24 财经快讯 + 板块池 + 资金流 + 技术面</strong>将发送给该 LLM 提供商处理（用于前瞻预期差分析）。
+            </div>
+          </div>
+        </div>
+
         <!-- 错误提示 -->
         <div v-if="props.error" class="p-3 rounded bg-red-950/80 border border-red-500/50 text-red-200">
           {{ props.error }}

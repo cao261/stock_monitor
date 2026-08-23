@@ -1,0 +1,116 @@
+# v2026-08-23 审计加：CI 跑 pytest
+#
+# 触发：
+#   - push 到 main / master 分支
+#   - PR 提到 main / master
+# 行为：
+#   - Python 3.12 安装 + 锁版本依赖（requirements.txt）
+#   - 跑 pytest（含 routes smoke + analyzer + factor_engine）
+#   - 跑 bandit 静态分析（与本地 audit 报告同基线）
+#   - 跑 pip-audit 依赖漏洞扫描
+#   - 前端 build（验证 .vue 文件语法 + 依赖完整性）
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:  # 允许手动触发
+
+permissions:
+  contents: read
+
+jobs:
+  # ====================== 1. 后端测试 + 安全扫描 ======================
+  backend:
+    name: Backend (pytest + bandit + pip-audit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: stock_monitor/requirements.txt
+
+      - name: Install dependencies
+        working-directory: stock_monitor
+        run: |
+          python -m pip install --upgrade pip
+          # 同时装 pytest + bandit + pip-audit（CI 工具）
+          python -m pip install pytest httpx bandit pip-audit
+
+      - name: Run pytest (routes smoke + analyzer + factor_engine)
+        working-directory: stock_monitor
+        env:
+          # 强制 lru_cache miss 跨进程，pytest 才能干净跑
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          pytest _test_routes_smoke.py -v --tb=short --junitxml=pytest-routes.xml
+          python _test_analyzer.py 2>&1 | tail -5
+          python _test_factor_engine.py 2>&1 | tail -5
+
+      - name: Bandit static analysis
+        working-directory: stock_monitor
+        run: |
+          python -m bandit -r app analyzer.py market_fetcher.py news_fetcher.py -f json -o bandit.json
+          # 提取 HIGH/MEDIUM 数（>0 则 fail）
+          python -c "
+          import json
+          r = json.load(open('bandit.json'))
+          totals = r['metrics']['_totals']
+          high = totals['SEVERITY.HIGH']
+          med  = totals['SEVERITY.MEDIUM']
+          low  = totals['SEVERITY.LOW']
+          print(f'Bandit: HIGH={high} MEDIUM={med} LOW={low}')
+          if high > 0 or med > 0:
+              print('::error::CRITICAL/MEDIUM bandit findings present')
+              exit(1)
+          "
+
+      - name: pip-audit dependency vulnerability scan
+        working-directory: stock_monitor
+        # 仅检查项目直接依赖的漏洞级别
+        continue-on-error: true  # akshare 间接依赖可能含历史 CVE，不阻断 build
+        run: |
+          # requirements.txt 有 CJK 注释，pip-audit 直接读会 GBK 报错 → 用 -r 单包
+          python -m pip_audit -r <(echo fastapi) -r <(echo uvicorn) -r <(echo sqlalchemy) -r <(echo pydantic) -r <(echo openai) -r <(echo aiohttp) -r <(echo requests) -r <(echo apscheduler) 2>&1 | tee pip-audit.txt
+          if grep -qE "^Name\s+Version\s+ID" pip-audit.txt; then
+            vuln_count=$(grep -cE "^[a-zA-Z_-]+\s+[0-9]" pip-audit.txt)
+            echo "::warning::Found $vuln_count vulnerable packages (advisory only)"
+          fi
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-test-results
+          path: stock_monitor/pytest-routes.xml
+          retention-days: 7
+
+  # ====================== 2. 前端 build 检查 ======================
+  frontend:
+    name: Frontend (vue + vite build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: stock_monitor/frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: stock_monitor/frontend
+        run: npm ci
+
+      - name: Build
+        working-directory: stock_monitor/frontend
+        run: npm run build

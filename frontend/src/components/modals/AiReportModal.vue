@@ -135,6 +135,19 @@ async function copyReport() {
 
       <!-- 报告正文 -->
       <div class="p-5 overflow-y-auto space-y-3 bg-[#0d1322]">
+        <!-- v2026-08-23 审计加：LLM 数据授权提示（用户明确知情同意：自选股+持仓会发给 LLM） -->
+        <div class="text-[11px] bg-amber-950/40 text-amber-200 border border-amber-800/60 rounded p-2.5 flex items-start gap-2">
+          <span class="text-base leading-none">⚠️</span>
+          <div class="flex-1 leading-relaxed">
+            <div class="font-semibold mb-0.5">数据已发送至第三方 LLM 服务</div>
+            <div class="text-amber-300/80">
+              本次复盘调用模型 <span class="font-mono text-amber-200">{{ props.report?.model || '未知 LLM' }}</span>，
+              您的<strong>自选股代码 / 持仓成本 / 浮盈亏 / 止盈止损 / 交易备忘</strong>等敏感信息将通过网络发送给该 LLM 提供商处理。
+              <span class="text-amber-400/70">详见后端日志留痕。</span>
+            </div>
+          </div>
+        </div>
+
         <div v-if="props.report?.file_path" class="text-[11px] font-mono text-slate-500 bg-slate-900 p-2 rounded border border-slate-800 flex items-center justify-between">
           <span>📁 已持久化保存至：{{ props.report.file_path }}</span>
           <span>{{ props.report.generated_at }}</span>

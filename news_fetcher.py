@@ -153,11 +153,27 @@ def _normalize_akshare_df(df) -> list[dict]:
     return items
 
 
+# v2026-08-23 审计优化：aiohttp 连接池懒加载（3 源 10min 轮询共用，连接复用）
+# aiohttp 3.14+ TCPConnector 构造时 asyncio.get_running_loop() → 必须从 async 上下文调
+_news_connector_instance: aiohttp.TCPConnector | None = None
+
+
+def _get_news_connector() -> aiohttp.TCPConnector:
+    global _news_connector_instance
+    if _news_connector_instance is None:
+        _news_connector_instance = aiohttp.TCPConnector(
+            limit=20,
+            ttl_dns_cache=600,  # 10min 轮询间隔，DNS 缓存也 10min
+            enable_cleanup_closed=True,
+        )
+    return _news_connector_instance
+
+
 # ====================== 三个源的具体抓取 ======================
 async def _fetch_from_cls() -> list[dict]:
     """从财联社拿快讯。失败抛异常。"""
     timeout = aiohttp.ClientTimeout(total=NEWS_HTTP_TIMEOUT_SECONDS)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, connector=_get_news_connector()) as session:
         async with session.get(CLS_URL, params=CLS_PARAMS, headers=CLS_HEADERS) as resp:
             resp.raise_for_status()
             data = await resp.json(content_type=None)
@@ -173,7 +189,7 @@ async def _fetch_from_cls() -> list[dict]:
 async def _fetch_from_sina() -> list[dict]:
     """从新浪 7x24 拿快讯。失败抛异常。"""
     timeout = aiohttp.ClientTimeout(total=NEWS_HTTP_TIMEOUT_SECONDS)
-    async with aiohttp.ClientSession(timeout=timeout) as session:
+    async with aiohttp.ClientSession(timeout=timeout, connector=_get_news_connector()) as session:
         async with session.get(SINA_URL, params=SINA_PARAMS, headers=SINA_HEADERS) as resp:
             resp.raise_for_status()
             data = await resp.json(content_type=None)

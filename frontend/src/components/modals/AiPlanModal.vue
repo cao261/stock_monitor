@@ -81,6 +81,19 @@ function fmtPct(v) {
 
       <!-- 内容区 -->
       <div class="p-4 overflow-y-auto space-y-3.5 bg-[#0d1322] text-xs">
+        <!-- v2026-08-23 审计加：LLM 数据授权提示（用户明确知情同意：持仓/K 线会发给 LLM） -->
+        <div class="text-[11px] bg-amber-950/40 text-amber-200 border border-amber-800/60 rounded p-2.5 flex items-start gap-2">
+          <span class="text-base leading-none">⚠️</span>
+          <div class="flex-1 leading-relaxed">
+            <div class="font-semibold mb-0.5">数据已发送至第三方 LLM 服务</div>
+            <div class="text-amber-300/80">
+              本次规划调用模型 <span class="font-mono text-amber-200">{{ props.planData?.model || '未知 LLM' }}</span>，
+              该股的<strong>最近 60 天 K 线、真实支撑/压力位、您的持仓成本与浮盈亏、交易备忘</strong>将发送给该 LLM 提供商处理。
+              <span class="text-amber-400/70">AI 计划在您点"应用"前不会写入数据库。</span>
+            </div>
+          </div>
+        </div>
+
         <!-- 👤 用户持仓底账与画像卡片 (核心个性化呈现) -->
         <div class="p-3 rounded border" :class="hasPosition ? 'bg-slate-900 border-slate-700' : 'bg-slate-900/60 border-slate-800'">
           <div class="flex items-center justify-between mb-2">

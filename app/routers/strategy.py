@@ -313,9 +313,10 @@ async def generate_ai_report(db: Session = Depends(get_db)) -> dict:
     except Exception as e:
         # v4.2: 顶层 logger 已存在（line 24），不再需要局部 import
         logger.exception("LLM 调用失败：%r", e)
+        # v2026-08-23 审计修复：detail 不直接返 e（避免 LLM 内部错误细节外泄）
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"AI 复盘生成失败：{e}",
+            detail="AI 复盘生成失败，请稍后重试。",
         ) from e
 
     # 3. v2.4.3: 存盘到 data/ai_reports/YYYY-MM-DD_HHMMSS.md（按召唤时间）
