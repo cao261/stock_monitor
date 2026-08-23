@@ -203,13 +203,20 @@ if FRONTEND_AVAILABLE:
     # 3) catch-all SPA fallback
     #    兜底 /watchlist、/signals 等前端路由（history 模式刷新不报 404）
     #    已经在前面注册过的（/api/*、/health、/assets/*、/favicon 等）会优先匹配
+    #    v2026-08-23 审计修复：限制 full_path 解析后必须仍在 FRONTEND_DIST 内，
+    #    防止 `../../etc/passwd` 类路径遍历读 uvicorn 进程可访问的任意文件
     @app.get("/{full_path:path}", include_in_schema=False)
     async def _spa_fallback(full_path: str):
         # 显式排除已知后端路径（防止任何误匹配）
         if full_path.startswith(("api/", "api")) or full_path in {"health", "openapi.json", "docs", "redoc"}:
             raise HTTPException(404)
+        # 路径遍历防御：target.resolve() 必须仍在 FRONTEND_DIST 内
+        try:
+            target = (FRONTEND_DIST / full_path).resolve(strict=False)
+            target.relative_to(FRONTEND_DIST.resolve())  # 越界抛 ValueError
+        except (ValueError, OSError):
+            raise HTTPException(404)
         # 如果是 dist 下真实存在的文件（favicon.svg 等），直接返回
-        target = FRONTEND_DIST / full_path
         if target.is_file():
             return FileResponse(target)
         # 否则 fallback 到 index.html（SPA history 路由）

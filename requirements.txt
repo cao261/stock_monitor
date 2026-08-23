@@ -1,8 +1,15 @@
-fastapi>=0.110
-uvicorn[standard]>=0.27
-SQLAlchemy>=2.0
-pydantic>=2.6
+# ====================== 后端核心依赖 ======================
+# v2026-08-23 审计后：锁版本（==），避免每次 pip install 拉到不同次依赖
+# 升级 aiohttp 3.14.1 → 3.14.3 修复 3 个 CVE（PYSEC-2026-3545/3546/3547）
+# 锁 akshare 保证 cryptography / pillow / lxml 等间接依赖稳定
+fastapi==0.138.0
+uvicorn[standard]==0.49.0
+SQLAlchemy==2.0.49
+pydantic==2.13.4
 # v2.4 LLM（兼容 OpenAI / DeepSeek / 各类 OpenAI-compatible API）
-openai>=1.40
-python-dotenv>=1.0
-aiohttp>=3.9  # market_fetcher 已经在用，没有的话补一下
+openai==2.37.0
+python-dotenv==1.2.2
+aiohttp==3.14.3   # 2026-08-23: 升级修复 3 个 PYSEC CVE
+# 第三方数据源：akshare + APScheduler（market_fetcher 已经在用）
+akshare==1.18.94
+APScheduler==3.11.3

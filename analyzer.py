@@ -12,11 +12,19 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, time
+from functools import lru_cache
 from typing import Any
 
 import market_fetcher as mf
 
 logger = logging.getLogger("analyzer")
+
+# v2026-08-23 审计优化：analyzer 函数加 lru_cache 缓解 router 层 N+1 调用
+# 容量 128 够一个 watchlist 50-80 只 + 5 种调用参数（target_*, position 等）的组合去重
+# 关键：lru_cache key 必须是 hashable。下游传入的 current/history 字典不能直接进 key，
+# 所以包成 helper 把 dict 转成 sorted tuple 串
+_SIGNAL_CACHE_SIZE = 128
+_GRID_CACHE_SIZE = 64
 
 # A 股交易时段（自然分钟数）
 MORNING_START = time(9, 30)
@@ -125,45 +133,25 @@ def calculate_market_sentiment() -> dict[str, Any]:
 
 
 # ====================== 功能 B：单只股票信号 ======================
-def check_signals(
+# v2026-08-23 审计优化：lru_cache 缓解 router 层 N+1。
+# dict 入参不 hashable → 把相关原始字段抽出来当 cache key（精确到价格/成交量/5d均量等 7 个原始值）
+# 容量 128：watchlist 50-80 只 × 几个调用方，足够覆盖
+@lru_cache(maxsize=_SIGNAL_CACHE_SIZE)
+def _check_signals_cached(
     code: str,
-    current: dict[str, Any],
-    history: dict[str, Any] | None = None,
-    *,
-    target_win: float | None = None,
-    target_loss: float | None = None,
-    position: int | None = None,
-    entry_price_min: float | None = None,
-    entry_price_max: float | None = None,
+    price: float,
+    open_p: float,
+    cur_vol: int,
+    chg: float,
+    avg_vol_5d: float,
+    minutes: int,
+    target_win: float | None,
+    target_loss: float | None,
+    position: int | None,
+    entry_price_min: float | None,
+    entry_price_max: float | None,
 ) -> dict[str, Any]:
-    """对单只股票判断 5 个信号（量比 ×2 + 止盈/止损 ×2 + v4.0 建仓机会 ×1）。
-
-    量比公式（与通达信、同花顺一致）::
-
-        量比 = 实时总成交量 / (过去 5 日均量 / 240 * 当前已开盘分钟数)
-
-    当 5 日均量为 0（无历史数据）或非交易时段时，量比按 0 处理，**不会**触发放量信号。
-
-    止盈止损（v1.2）：
-      - target_win  设置 + 现价 >= target_win + **有持仓 (position>0)**  → is_take_profit
-      - target_loss 设置 + 现价 <= target_loss + **有持仓 (position>0)** → is_stop_loss
-      - v3.1: 空仓时强制 is_take_profit / is_stop_loss = False（幽灵告警修复）
-        量比信号 (is_volume_breakout / is_shrinking_pullback) 不受持仓状态影响
-      - 都触发时 `trade_message` 给出双行提示文案
-
-    v4.0 建仓机会（领航员前瞻信号）：
-      - 空仓 (position is None or <= 0) + entry_price_min / entry_price_max 都已设置
-        + 现价落入 [min, max] 区间内 → is_entry_opportunity = True
-      - 前端金色高亮 + 桌面弹窗（每日每只股票最多 1 次）
-    """
-    avg_vol_5d = float((history or {}).get("avg_volume_5d") or 0.0)
-    minutes = trading_minutes_elapsed()
-
-    cur_vol = int(current.get("volume") or 0)
-    chg = float(current.get("change_pct") or 0.0)
-    price = float(current.get("price") or 0.0)
-    open_p = float(current.get("open") or 0.0)
-
+    """check_signals 的纯计算实现 + lru_cache。"""
     # 预期成交量 = 5日均量 / 240 * 当前已开盘分钟数（股）
     expected = (avg_vol_5d / TRADING_MINUTES_PER_DAY) * minutes if avg_vol_5d > 0 else 0.0
     vol_ratio = (cur_vol / expected) if expected > 0 else 0.0
@@ -219,7 +207,7 @@ def check_signals(
 
     return {
         "code": code,
-        "name": current.get("name"),
+        "name": None,  # 公开层补回
         "trading_minutes": minutes,
         "is_trading_time": _is_trading_time(),
         "volume_ratio": round(vol_ratio, 3),
@@ -227,7 +215,7 @@ def check_signals(
             "price": price,
             "close": price,  # v4.5: close 别名（strategy.py daily-summary 按 close 读价）
             "open": open_p,
-            "prev_close": float(current.get("prev_close") or 0.0),
+            "prev_close": 0.0,  # 公开层补回
             "change_pct": chg,
             "volume": cur_vol,
         },
@@ -247,7 +235,107 @@ def check_signals(
     }
 
 
+def check_signals(
+    code: str,
+    current: dict[str, Any],
+    history: dict[str, Any] | None = None,
+    *,
+    target_win: float | None = None,
+    target_loss: float | None = None,
+    position: int | None = None,
+    entry_price_min: float | None = None,
+    entry_price_max: float | None = None,
+) -> dict[str, Any]:
+    """对单只股票判断 5 个信号（量比 ×2 + 止盈/止损 ×2 + v4.0 建仓机会 ×1）。
+
+    量比公式（与通达信、同花顺一致）::
+
+        量比 = 实时总成交量 / (过去 5 日均量 / 240 * 当前已开盘分钟数)
+
+    当 5 日均量为 0（无历史数据）或非交易时段时，量比按 0 处理，**不会**触发放量信号。
+
+    止盈止损（v1.2）：
+      - target_win  设置 + 现价 >= target_win + **有持仓 (position>0)**  → is_take_profit
+      - target_loss 设置 + 现价 <= target_loss + **有持仓 (position>0)** → is_stop_loss
+      - v3.1: 空仓时强制 is_take_profit / is_stop_loss = False（幽灵告警修复）
+        量比信号 (is_volume_breakout / is_shrinking_pullback) 不受持仓状态影响
+      - 都触发时 `trade_message` 给出双行提示文案
+
+    v4.0 建仓机会（领航员前瞻信号）：
+      - 空仓 (position is None or <= 0) + entry_price_min / entry_price_max 都已设置
+        + 现价落入 [min, max] 区间内 → is_entry_opportunity = True
+      - 前端金色高亮 + 桌面弹窗（每日每只股票最多 1 次）
+
+    v2026-08-23 优化：内部委托给 ``_check_signals_cached``，按原始字段做 lru_cache。
+    容量 128，hit 率高时（如 /quotes 同一请求内重复调用）N+1 变 O(1)。
+    """
+    avg_vol_5d = float((history or {}).get("avg_volume_5d") or 0.0)
+    minutes = trading_minutes_elapsed()
+
+    cur_vol = int(current.get("volume") or 0)
+    chg = float(current.get("change_pct") or 0.0)
+    price = float(current.get("price") or 0.0)
+    open_p = float(current.get("open") or 0.0)
+
+    result = _check_signals_cached(
+        code,
+        price,
+        open_p,
+        cur_vol,
+        chg,
+        avg_vol_5d,
+        minutes,
+        target_win,
+        target_loss,
+        position,
+        entry_price_min,
+        entry_price_max,
+    )
+    # 公开层补回 name / prev_close（这两个不参与纯计算，缓存层不放）
+    result["name"] = current.get("name")
+    result["current"]["prev_close"] = float(current.get("prev_close") or 0.0)
+    return result
+
+
 # ====================== 功能 C：网格动态追踪（v2.7，v3.1 加空仓强校验）======================
+# v2026-08-23 审计优化：lru_cache 缓解 N+1。所有入参都是 hashable primitive，可直接缓存
+@lru_cache(maxsize=_GRID_CACHE_SIZE)
+def _check_grid_signals_cached(
+    price: float,
+    last_grid_price: float | None,
+    cost_price: float | None,
+    grid_step_pct: float,
+    position: int | None,
+) -> dict[str, Any]:
+    """check_grid_signals 的纯计算实现 + lru_cache。"""
+    reference = (
+        last_grid_price if (last_grid_price is not None and last_grid_price > 0) else cost_price
+    )
+    if reference is None or reference <= 0:
+        return {
+            "grid_reference_price": None,
+            "grid_distance": None,
+            "is_grid_buy": False,
+            "is_grid_sell": False,
+        }
+
+    grid_distance = round((float(price) - float(reference)) / float(reference) * 100.0, 2)
+    is_grid_buy = bool(grid_distance <= -float(grid_step_pct))
+    is_grid_sell = bool(grid_distance >= float(grid_step_pct))
+
+    # v3.1: 空仓时禁掉 is_grid_sell（避免"幽灵卖出信号"）
+    if position is None or int(position) <= 0:
+        is_grid_sell = False
+    # 关键保留：空仓时 is_grid_buy 仍触发（这是"等跌建仓"的预期场景）
+
+    return {
+        "grid_reference_price": float(reference),
+        "grid_distance": grid_distance,
+        "is_grid_buy": is_grid_buy,
+        "is_grid_sell": is_grid_sell,
+    }
+
+
 def check_grid_signals(
     price: float | None,
     last_grid_price: float | None,
@@ -268,6 +356,9 @@ def check_grid_signals(
         if position <= 0 (空仓)：
             is_grid_sell 永远 False（空仓不能卖）
             is_grid_buy  仍可触发（空仓等跌到加仓位建仓，这是预期场景）
+
+    v2026-08-23 优化：内部委托给 ``_check_grid_signals_cached``。
+    容量 64，watchlist 内多次重复调用秒回。
     """
     empty: dict[str, Any] = {
         "grid_reference_price": None,
@@ -280,27 +371,13 @@ def check_grid_signals(
         return empty
     if grid_step_pct is None or grid_step_pct <= 0:
         return empty
-    reference = (
-        last_grid_price if (last_grid_price is not None and last_grid_price > 0) else cost_price
+    return _check_grid_signals_cached(
+        float(price),
+        float(last_grid_price) if last_grid_price is not None else None,
+        float(cost_price) if cost_price is not None else None,
+        float(grid_step_pct),
+        int(position) if position is not None else None,
     )
-    if reference is None or reference <= 0:
-        return empty
-
-    grid_distance = round((float(price) - float(reference)) / float(reference) * 100.0, 2)
-    is_grid_buy = bool(grid_distance <= -float(grid_step_pct))
-    is_grid_sell = bool(grid_distance >= float(grid_step_pct))
-
-    # v3.1: 空仓时禁掉 is_grid_sell（避免"幽灵卖出信号"）
-    if position is None or int(position) <= 0:
-        is_grid_sell = False
-    # 关键保留：空仓时 is_grid_buy 仍触发（这是"等跌建仓"的预期信号）
-
-    return {
-        "grid_reference_price": float(reference),
-        "grid_distance": grid_distance,
-        "is_grid_buy": is_grid_buy,
-        "is_grid_sell": is_grid_sell,
-    }
 
 
 # ====================== 功能 D: v4.0 K 线特征提取（给 AI 智能规划用）======================

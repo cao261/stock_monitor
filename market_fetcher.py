@@ -124,11 +124,9 @@ import concurrent.futures
 # ====================== 2. 拉代码清单（同步，run_in_executor 调用）======================
 def _fetch_from_sina_codes() -> list[dict[str, str]]:
     """备用源：从新浪行情中心拉全量 A 股（5,500+ 只）"""
-    sess = requests.Session()
-    sess.trust_env = False
     headers = {"Referer": "http://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}
-    
-    def _fetch_page(p: int) -> list[dict[str, str]]:
+
+    def _fetch_page(p: int, sess: requests.Session) -> list[dict[str, str]]:
         url = (
             f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
             f"Market_Center.getHQNodeData?page={p}&num=100&sort=symbol&asc=1&node=hs_a&symbol=&_s_r_a=init"
@@ -148,8 +146,11 @@ def _fetch_from_sina_codes() -> list[dict[str, str]]:
             pass
         return []
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        pages = list(executor.map(_fetch_page, range(1, 60)))
+    # v2026-08-23 审计修复：用 with 显式管理 Session 生命周期（依赖 GC 之前会泄漏连接）
+    with requests.Session() as sess:
+        sess.trust_env = False
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            pages = list(executor.map(lambda p: _fetch_page(p, sess), range(1, 60)))
     return [it for page in pages for it in page]
 
 
@@ -571,17 +572,18 @@ def fetch_history_sync(code: str, days: int = HISTORY_FETCH_DAYS) -> dict[str, A
     失败时返回 ``_empty_history()``（不抛异常，避免阻塞批处理）。
     """
     try:
+        # v2026-08-23 审计修复：用 with 显式管理 Session 生命周期，避免依赖 GC
         # 不读环境代理：腾讯域名在国内基本不靠代理，绕开 Windows 系统代理
-        sess = requests.Session()
-        sess.trust_env = False
-        resp = sess.get(
-            TENCENT_KLINE_URL,
-            params={"param": f"{code},day,,,{days},qfq"},
-            headers=TENCENT_HEADERS,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
+        with requests.Session() as sess:
+            sess.trust_env = False
+            resp = sess.get(
+                TENCENT_KLINE_URL,
+                params={"param": f"{code},day,,,{days},qfq"},
+                headers=TENCENT_HEADERS,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
         if payload.get("code") != 0:
             return _empty_history()
         data = (payload.get("data") or {}).get(code) or {}
